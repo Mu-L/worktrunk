@@ -26,7 +26,8 @@ worktrunk/                          ← repo root = marketplace root
     ├── skills -> ../../skills       ← symlink; single-sources skills across all
     │                                  tools and the docs auto-sync
     ├── CLAUDE.md / README.md
-    └── (Codex ships no hooks — see Known Limitations below)
+    └── (Codex ships no hooks — its manifest sets `hooks: {}` to suppress
+        auto-discovery of the Claude hooks.json above; see Known Limitations)
 ```
 
 Path resolution differs by tool, all verified end-to-end against the real CLIs:
@@ -67,9 +68,11 @@ The 💬 transitions overlap deliberately: `Notification` covers the documented 
 
 ### Codex ships no activity hooks
 
-The Claude manifest carries `hooks: "./hooks/hooks.json"`; the Codex manifest has no `hooks` key and Codex ships no hooks. Codex's `HookEventNameWire` vocabulary (codex-cli 0.130.0: `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`) has no `Stop`/turn-end event, so a 🤖 marker set on `UserPromptSubmit` could never return to 💬 — it would stick at "working" indefinitely.
+The Claude manifest carries `hooks: "./hooks/hooks.json"`; the Codex manifest carries `hooks: {}` — an empty *inline* hooks object, **not** an absent key. The distinction matters: when a plugin manifest omits `hooks`, Codex auto-discovers `hooks/hooks.json` from the plugin root by convention (`DEFAULT_HOOKS_CONFIG_FILE`, the `None` branch of `load_plugin_hooks`). Because Claude and Codex share one payload dir, an absent key would make Codex pick up Worktrunk's *Claude* hooks file and surface the Claude events it recognizes in a Codex session ([#3362](https://github.com/max-sixty/worktrunk/issues/3362)). An empty inline object takes the `Some(Inline)` branch instead — skipped as empty — and never reaches auto-discovery, so no hooks load. (An empty `hooks: []` array would *not* work: an empty path list falls back to discovery.)
 
-Re-add a Codex `hooks.json`, the `hooks` manifest key, the install hints in `src/commands/config/codex.rs`, and the docs (`docs/content/claude-code.md` "Activity tracking", `src/cli/config.rs` plugin list) once Codex exposes a turn-end hook event.
+Suppression is the right default regardless of Codex's event vocabulary. Even though current Codex *does* now expose a `Stop`/turn-end event (unlike codex-cli 0.130.0), it has no `SessionEnd` equivalent to clear the marker, so a 💬 set at turn-end would stick after the session exits; and surfacing Claude-branded events at all is poor UX in a Codex session.
+
+To add Codex-native activity hooks later, ship a *Codex-tailored* hooks file and point the manifest's `hooks` key at it (a path, or an inline object) so it overrides discovery rather than colliding with the Claude `hooks/hooks.json`; also restore the install hints in `src/commands/config/codex.rs` and the docs (`docs/content/claude-code.md` "Activity tracking", `src/cli/config.rs` plugin list).
 
 ### Accepted tradeoff: shared `skills/` exposes `wt-switch-create`
 

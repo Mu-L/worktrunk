@@ -44,11 +44,13 @@ pub fn handle_codex_install(yes: bool) -> Result<()> {
         "{}",
         hint_message("Next, run /plugins in Codex and install Worktrunk from the marketplace")
     );
-    // The Codex plugin deliberately ships no activity-marker hooks: Codex's
-    // HookEventNameWire vocabulary (codex-cli 0.130.0) has no `Stop`/turn-end
-    // event, so a 🤖 set on UserPromptSubmit could never return to 💬 within a
-    // session. Re-add the hooks (and restore the marker hints + docs) once
-    // Codex exposes a turn-end hook event. See CLAUDE.md → "Plugin Layout".
+    // The Codex plugin deliberately ships no activity-marker hooks: its
+    // manifest sets `hooks: {}` (an empty inline object) to suppress Codex's
+    // auto-discovery of the shared Claude `hooks/hooks.json`, which would
+    // otherwise surface Claude-branded events in a Codex session. To add
+    // Codex-native hooks later, point the manifest `hooks` key at a
+    // Codex-tailored file and restore the marker hints + docs. See CLAUDE.md
+    // → "Plugin Layout".
 
     Ok(())
 }

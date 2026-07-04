@@ -3847,14 +3847,18 @@ fn test_codex_plugin_metadata_is_valid_json() {
             .contains("claude-code"),
         "plugin.json interface.websiteURL must point at the canonical site"
     );
-    // The Codex plugin ships no activity-marker hooks: Codex's
-    // HookEventNameWire vocabulary (codex-cli 0.130.0) has no `Stop`/turn-end
-    // event, so a 🤖 set on UserPromptSubmit could never return to 💬 within a
-    // session. Keep the Codex manifest free of a `hooks` key, and its wrapper
-    // dir manifest-only, until Codex adds a turn-end hook event — see CLAUDE.md
-    // → "Plugin Layout". (plugins/worktrunk/hooks/ exists post-consolidation,
-    // but it is the *Claude* plugin's — Codex's manifest never references it.)
-    assert_eq!(plugin.get("hooks"), None);
+    // The Codex plugin ships no activity-marker hooks, but it must say so
+    // *explicitly*: an absent `hooks` key does NOT mean "no hooks" to Codex.
+    // When the manifest omits `hooks`, Codex auto-discovers `hooks/hooks.json`
+    // from the plugin root by convention (DEFAULT_HOOKS_CONFIG_FILE), and since
+    // Claude and Codex share one payload dir it would pick up Worktrunk's
+    // *Claude* hooks file — surfacing Claude-branded events in a Codex session
+    // (#3362). An empty inline `hooks: {}` object takes Codex's Some(Inline)
+    // branch (skipped as empty) and never reaches the None auto-discovery
+    // branch, suppressing the shared file. See CLAUDE.md → "Plugin Layout".
+    // (plugins/worktrunk/hooks/ exists post-consolidation, but it is the
+    // *Claude* plugin's; Codex's manifest now overrides discovery of it.)
+    assert_eq!(plugin.get("hooks"), Some(&serde_json::json!({})));
     assert!(
         !project_root
             .join("plugins/worktrunk/.codex-plugin/hooks")
