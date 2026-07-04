@@ -84,6 +84,18 @@ cargo test --test integration       # integration tests only
 
 CI runs on Linux, Windows, and macOS.
 
+**`cargo` is installed but not on the default `PATH` in the tend sandbox.**
+The toolchain lives at `$HOME/.cargo/bin`, but the sandbox shell doesn't put
+it on `PATH`, so the *first* bare `cargo …` call in a run fails with `cargo:
+command not found`. Source the cargo env once, before any `cargo` (or `task`)
+command, rather than probing for it after a failure:
+
+```bash
+. "$HOME/.cargo/env"   # or: export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+(`rustc`/`clippy` are on `PATH`; only the `cargo` front-end needs this.)
+
 ## Session Log Paths
 
 Artifact paths: `-home-runner-work-worktrunk-worktrunk/<session-id>.jsonl`
