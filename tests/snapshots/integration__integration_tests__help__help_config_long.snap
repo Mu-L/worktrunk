@@ -134,6 +134,7 @@ Controls where new worktrees are created.
 - [2m{{ branch | sanitize }}[0m — filesystem-safe: [2m/[0m and [2m\[0m become [2m-[0m (e.g., [2mfeature-auth[0m)
 - [2m{{ branch | sanitize_db }}[0m — database-safe: lowercase, underscores, hash suffix (e.g., [2mfeature_auth_x7k[0m)
 - [2m{{ branch | codename(2) }}[0m — deterministic friendly name from a ~1.26M-combo pool (e.g., [2mmalleable-opah[0m)
+- [2m{{ branch | basename }}[0m — last [2m/[0m-separated segment, dropping any namespace prefix ([2mclaude/frosty-kilby[0m → [2mfrosty-kilby[0m)
 
 This is a smaller set than the variables hooks and aliases get.
 
@@ -146,6 +147,12 @@ Default — sibling directory ([2m~/code/myproject.feature-auth[0m):
 Inside the repository ([2m~/code/myproject/.worktrees/feature-auth[0m):
 
 [107m [0m [2mworktree-path = [0m[2m[32m"{{ repo_path }}/.worktrees/{{ branch | sanitize }}"[0m
+
+Namespaced branches, prefix dropped ([2m~/code/myproject/.worktrees/auth[0m):
+
+[107m [0m [2mworktree-path = [0m[2m[32m"{{ repo_path }}/.worktrees/{{ branch | basename }}"[0m
+
+[2m{{ branch | basename }}[0m keeps only the last [2m/[0m-separated segment, so a branch like [2mclaude/frosty-kilby[0m checked out into a directory named [2mfrosty-kilby[0m matches its expected path — keeping the [31m⚑[0m branch/worktree mismatch flag in [2mwt list[0m for genuine cross-wires rather than routine namespaced branches.
 
 Friendly branch-derived names ([2m~/code/myproject.malleable-opah[0m):
 

@@ -82,6 +82,7 @@ Controls where new worktrees are created.
 - `{{ branch | sanitize }}` — filesystem-safe: `/` and `\` become `-` (e.g., `feature-auth`)
 - `{{ branch | sanitize_db }}` — database-safe: lowercase, underscores, hash suffix (e.g., `feature_auth_x7k`)
 - `{{ branch | codename(2) }}` — deterministic friendly name from a ~1.26M-combo pool (e.g., `malleable-opah`)
+- `{{ branch | basename }}` — last `/`-separated segment, dropping any namespace prefix (`claude/frosty-kilby` → `frosty-kilby`)
 
 This is a smaller set than [the variables hooks and aliases get](@/hook.md#template-variables).
 
@@ -98,6 +99,14 @@ Inside the repository (`~/code/myproject/.worktrees/feature-auth`):
 ```toml
 worktree-path = "{{ repo_path }}/.worktrees/{{ branch | sanitize }}"
 ```
+
+Namespaced branches, prefix dropped (`~/code/myproject/.worktrees/auth`):
+
+```toml
+worktree-path = "{{ repo_path }}/.worktrees/{{ branch | basename }}"
+```
+
+`{{ branch | basename }}` keeps only the last `/`-separated segment, so a branch like `claude/frosty-kilby` checked out into a directory named `frosty-kilby` matches its expected path — keeping the `⚑` branch/worktree mismatch flag in `wt list` for genuine cross-wires rather than routine namespaced branches.
 
 Friendly branch-derived names (`~/code/myproject.malleable-opah`):
 
