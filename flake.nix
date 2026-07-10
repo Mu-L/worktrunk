@@ -158,12 +158,16 @@
               src = pkgs.lib.cleanSource ./.;
               # Tests shell out to a few host tools — `git` for the harness,
               # `python3` for argv-quoting and post-start fixtures, `ps`
-              # (procps) for the pgid invariant test. Without these on PATH
-              # the sandbox surfaces them as `No such file or directory`.
+              # (procps) for the pgid invariant test, `lsof` for the
+              # `--reap` process-discovery test (`processes_under` shells out
+              # to `lsof -d cwd`; absent, it returns empty and the test times
+              # out waiting for the child). Without these on PATH the sandbox
+              # surfaces them as `No such file or directory`.
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
                 pkgs.git
                 pkgs.python3
                 pkgs.procps
+                pkgs.lsof
               ];
             }
           );
