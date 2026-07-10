@@ -94,7 +94,10 @@ command, rather than probing for it after a failure:
 . "$HOME/.cargo/env"   # or: export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-(`rustc`/`clippy` are on `PATH`; only the `cargo` front-end needs this.)
+(The *entire* toolchain — `rustc`, `clippy-driver`, `rustfmt`, `cargo` —
+lives in `$HOME/.cargo/bin`, and none of it is on `PATH`; sourcing the env
+fixes all of them at once, so a bare `rustc --version` toolchain check needs
+it too.)
 
 ## Session Log Paths
 
