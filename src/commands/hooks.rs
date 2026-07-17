@@ -448,7 +448,7 @@ pub(crate) fn into_source_groups(flat: Vec<SourcedStep>) -> Vec<Vec<SourcedStep>
     groups
 }
 
-/// Emit a `template variables:` block for one hook type, using the first
+/// Emit a `Template variables:` block for one hook type, using the first
 /// matching pipeline's first step context.
 ///
 /// Background hooks don't flow through `announce_command` (which prints the
@@ -465,7 +465,7 @@ fn print_background_variable_table(pipelines: &[PendingPipeline], hook_type: Hoo
             PreparedStep::Single(cmd) => cmd,
             PreparedStep::Concurrent(cmds) => &cmds[0],
         };
-        eprintln!("{}", info_message("template variables:"));
+        eprintln!("{}", info_message("Template variables:"));
         eprintln!(
             "{}",
             format_with_gutter(&format_hook_variables(hook_type, &cmd.context), None)

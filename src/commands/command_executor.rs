@@ -228,7 +228,7 @@ impl<'a> CommandContext<'a> {
 /// `referenced_vars_for_config` set (extended via `alias_context_filter`)
 /// so unused git lookups (`var_commit` rev-parse, `var_default_branch` cold
 /// detection, `branch().upstream()`) are skipped, and the verbose
-/// `template variables:` table only lists vars the body actually references.
+/// `Template variables:` table only lists vars the body actually references.
 /// Hooks pass `None` so every standard var stays available — the child
 /// receives the full context as JSON on stdin and may consume keys that
 /// don't appear in the inline `{{ }}` template (e.g. via `jq`).
@@ -628,7 +628,7 @@ fn announce_command(cmd: &PreparedCommand, kind: &PipelineKind, command_str: &st
     };
     if verbosity() >= 1 {
         let vars = format_hook_variables(*hook_type, &cmd.context);
-        eprintln!("{}", info_message("template variables:"));
+        eprintln!("{}", info_message("Template variables:"));
         eprintln!("{}", format_with_gutter(&vars, None));
     }
     eprintln!("{}", progress_message(message));

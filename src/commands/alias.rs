@@ -618,7 +618,7 @@ fn run_alias(
 
     if verbosity() >= 1 {
         let vars = format_alias_variables(&context_map, Some(&referenced));
-        eprintln!("{}", info_message("template variables:"));
+        eprintln!("{}", info_message("Template variables:"));
         eprintln!("{}", format_with_gutter(&vars, None));
     }
 

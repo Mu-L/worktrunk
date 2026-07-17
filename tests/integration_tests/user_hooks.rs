@@ -1232,7 +1232,7 @@ notify = "echo switched"
 
 /// Verbose variant of [`test_combined_post_remove_and_post_switch_hooks`].
 ///
-/// Under `-v`, the announcer prints a `template variables:` table for each
+/// Under `-v`, the announcer prints a `Template variables:` table for each
 /// registered hook type, iterating over pipelines and skipping those whose
 /// hook type doesn't match — that filter branch needs at least two hook
 /// types in one batch to fire. Removing the current worktree's branch is
