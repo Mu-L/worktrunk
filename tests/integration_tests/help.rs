@@ -12,6 +12,7 @@
 #![cfg(not(windows))]
 
 use crate::common::{add_standard_env_redactions, wt_command};
+use ansi_str::AnsiStr as _;
 use insta::Settings;
 use insta_cmd::assert_cmd_snapshot;
 use rstest::rstest;
@@ -54,6 +55,29 @@ fn snapshot_help(test_name: &str, args: &[&str]) {
     });
 }
 
+#[test]
+fn test_merge_help_describes_exact_shape_no_rebase() {
+    let output = wt_command()
+        .args(["merge", "--help"])
+        .output()
+        .expect("failed to run wt merge --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.ansi_strip();
+    assert!(
+        stdout.contains("Skip rebase; require the target to fast-forward to the resulting tip"),
+        "missing graph-preservation contract:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("wt merge --no-commit --no-rebase"),
+        "missing exact-shape example:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("explicit --no-rebase preserves the graph produced by earlier steps"),
+        "missing no-ff qualification:\n{stdout}"
+    );
+}
+
 // Root command (wt)
 #[rstest]
 #[case("help_root_short", "-h")]
@@ -73,6 +97,7 @@ fn snapshot_help(test_name: &str, args: &[&str]) {
 #[case("help_step_short", "step -h")]
 #[case("help_step_long", "step --help")]
 #[case("help_step_promote", "step promote --help")]
+#[case("help_step_copy_ignored", "step copy-ignored --help")]
 // Config subcommands (long help only - these are less frequently accessed)
 #[case("help_config_shell", "config shell --help")]
 #[case("help_config_create", "config create --help")]
@@ -96,6 +121,7 @@ fn snapshot_help(test_name: &str, args: &[&str]) {
 #[case("help_config_state_ci_status", "config state ci-status --help")]
 #[case("help_config_state_marker", "config state marker --help")]
 #[case("help_config_state_logs", "config state logs --help")]
+#[case("help_config_state_logs_profile", "config state logs profile --help")]
 #[case("help_config_state_get", "config state get --help")]
 #[case("help_config_state_clear", "config state clear --help")]
 #[case("help_config_approvals", "config approvals --help")]
@@ -155,11 +181,12 @@ fn test_help_goes_to_stdout() {
 }
 
 /// When stdout is piped, help must be plain text — no ANSI escapes leaking into
-/// `wt --help > file.txt` or `wt --help | less`. Uses the raw binary so
-/// `CLICOLOR_FORCE` (set by `wt_command`) doesn't override color detection.
+/// `wt --help > file.txt` or `wt --help | less`. Built from `wt_command()` for
+/// HOME/config isolation, then clears the `CLICOLOR_FORCE` it sets so color
+/// detection sees a non-tty (piped) stdout.
 #[test]
 fn test_help_strips_ansi_when_piped() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wt"))
+    let output = wt_command()
         .arg("--help")
         .env_remove("CLICOLOR_FORCE")
         .env("NO_COLOR", "1")

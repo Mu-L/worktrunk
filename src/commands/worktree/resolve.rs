@@ -133,21 +133,6 @@ pub fn is_worktree_at_expected_path(
     }
 }
 
-/// Returns the expected path if `actual_path` differs from the template-computed path.
-///
-/// Returns `Some(expected_path)` when there's a mismatch, `None` when paths match.
-/// Used to show path mismatch warnings in switch, picker, remove, and merge.
-pub fn path_mismatch(
-    repo: &Repository,
-    branch: &str,
-    actual_path: &std::path::Path,
-    config: &UserConfig,
-) -> Option<PathBuf> {
-    compute_worktree_path(repo, branch, config)
-        .ok()
-        .filter(|expected| !paths_match(actual_path, expected))
-}
-
 /// Compute a user-facing display name for a worktree.
 ///
 /// Returns styled content with branch names bolded:
@@ -246,9 +231,7 @@ pub fn offer_bare_repo_worktree_path_fix(
     let example_bad = format!("{parent_name}/{repo_name}.{sanitized}");
     let example_good = format!("{parent_name}/{sanitized}");
 
-    let config_path_display = worktrunk::config::config_path()
-        .map(|p| format_path_for_display(&p).to_string())
-        .unwrap_or_else(|| "~/.config/worktrunk/config.toml".to_string());
+    let config_path_display = worktrunk::config::config_path_for_display();
 
     // Non-interactive: warn and show the config to add.
     if !std::io::stdin().is_terminal() {

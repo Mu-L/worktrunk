@@ -4,7 +4,6 @@
 //
 // Windows path differences are handled by snapshot filters in setup_snapshot_settings().
 
-pub mod analyze_trace;
 pub mod approval_pty;
 
 pub mod approval_save;
@@ -42,6 +41,7 @@ pub mod list_progressive;
 pub mod merge;
 pub mod nushell_default_config_dir;
 pub mod output_system_guard;
+pub mod packaged_assets;
 pub mod post_start_commands;
 pub mod push;
 pub mod readme_sync;

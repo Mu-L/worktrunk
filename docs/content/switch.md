@@ -56,7 +56,9 @@ Shortcuts also apply to `--base`. For a fork PR/MR, the head commit is fetched a
 
 ## Interactive picker
 
-When called without arguments, `wt switch` opens an interactive picker to browse and select worktrees with live preview.
+When called without arguments, `wt switch` opens an interactive picker to browse and select worktrees with live preview. The candidate set widens with `--branches` (local branches without worktrees), `--remotes` (remote branches), and `--prs` (open PRs/MRs — see below).
+
+The CI column shows each row's PR/MR CI and review status, the same as [`wt list --full`](@/list.md).
 
 <figure class="demo">
 <picture>
@@ -73,22 +75,35 @@ When called without arguments, `wt switch` opens an interactive picker to browse
 | (type) | Filter worktrees |
 | `Enter` | Switch to selected worktree |
 | `Alt-c` | Create new worktree named as entered text |
+| `Alt-x` | Remove selected worktree/branch |
+| `Alt-y` | Copy selected branch name to the clipboard |
+| `Alt-o` | Open the selected row's PR/MR URL in the browser |
+| `Alt-r` | Refresh the list (pick up worktrees created elsewhere) |
 | `Esc` | Cancel |
-| `Alt-1`–`Alt-5` | Jump to a preview tab |
+| `Alt-1`–`Alt-7` | Jump to a preview tab |
 | `Tab`/`Shift-Tab` | Cycle preview tabs forward/backward |
 | `Alt-p` | Toggle preview panel |
 | `Ctrl-u`/`Ctrl-d` | Scroll preview up/down |
-<!-- Alt-r (remove worktree) works but is omitted: cursor resets after skim reload (#1695). Add once fixed. See #1881. -->
 
-Plain digits go to the filter, so a branch name containing a number can be typed directly; the preview tabs move to `Alt`.
+`Alt-o` is a no-op on a row with no PR/MR (or whose status hasn't loaded yet).
 
-**Preview tabs** — jump with `Alt-1`–`Alt-5`, or cycle with `Tab`/`Shift-Tab`:
+`Alt-x` is a no-op on the current worktree (the `@` row) — removing the worktree in use would have to switch elsewhere first, so switch away and remove it from there.
+
+Each row filters by its branch, path, and — when it has a PR/MR — the PR/MR's number, title, and author, the same fields whether the PR is checked out (a worktree row) or listed via `--prs`. Plain digits go to the filter, so a number can be typed directly and the preview tabs move to `Alt`.
+
+Typing a gutter sigil filters by row kind: `+` narrows to linked worktrees and `@` to the current worktree. The other sigils don't filter cleanly — `^` and `|` are skim's prefix-anchor and OR query operators (so `^` matches every row and `|` none), and `/` matches most rows because every worktree path contains it.
+
+**Preview tabs:**
 
 1. **HEAD±** — Diff of uncommitted changes
 2. **log** — Recent commits; commits already on the default branch have dimmed hashes
 3. **main…±** — Diff of changes since the merge-base with the default branch
 4. **remote⇅** — Ahead/behind diff vs upstream tracking branch
 5. **summary** — LLM-generated branch summary; requires `[list] summary = true` and [`commit.generation`](@/config.md#commit)
+6. **pr** — The selected row's PR/MR, for any row whose branch has one
+7. **comments** — The PR/MR's comment thread, fetched from the forge on `--prs` rows
+
+On narrow previews the tab bar compacts to digits — only the active tab keeps its label — so every `Alt-N` accelerator stays visible.
 
 **Pager configuration:** The preview panel pipes diff output through git's pager. Override in user config:
 
@@ -97,17 +112,17 @@ Plain digits go to the filter, so a branch name containing a number can be typed
 pager = "delta --paging=never --width=$COLUMNS"
 ```
 
-Available on Unix only (macOS, Linux). On Windows, use `wt list` or `wt switch <branch>` directly.
-
 ## Pull requests and merge requests
 
 The `pr:<number>` / `mr:<number>` shortcut and the PR/MR's web URL both resolve to its branch. For same-repo PRs/MRs, worktrunk switches to the branch directly. For fork PRs/MRs, it fetches the ref (`refs/pull/N/head` or `refs/merge-requests/N/head`) and configures `pushRemote` to the fork URL.
 
-{{ terminal(cmd="wt switch pr:101                                  # GitHub PR #101|||wt switch https://github.com/owner/repo/pull/101  # ...the same PR, by URL|||wt switch mr:101                                  # GitLab MR !101|||wt switch https://gitlab.com/owner/repo/-/merge_requests/101  # ...the same MR, by URL") }}
+{{ terminal(cmd="wt switch pr:101                                  # GitHub PR #101|||wt switch https://github.com/owner/repo/pull/101  # ...the same PR, by URL|||wt switch mr:101                                  # GitLab MR !101|||wt switch https://gitlab.com/owner/repo/-/merge_requests/101  # ...the same MR, by URL|||wt switch --prs                                   # Browse open PRs/MRs in the picker") }}
 
 Both work anywhere a branch is accepted, including `--base`. The `--create` flag cannot be used with a PR/MR reference since the branch already exists.
 
 If the PR or MR is on a fork, the local branch uses its branch name directly, so `git push` works normally. A pre-existing local branch with that name tracking something else requires renaming first.
+
+The `--prs` flag adds the repository's open PRs (GitHub) or MRs (GitLab) to the interactive picker — only the ones not already there: a PR whose branch is already shown (as a worktree, or a local or remote branch) isn't listed twice, so `--prs` only adds the rest and the two pickers differ solely by those extra rows. Each added row resolves to the same `pr:`/`mr:` shortcut, so selecting one fetches the ref and switches to its branch. A `--prs` row has no local worktree, so its `pr` and `comments` preview tabs load the PR/MR's metadata and comments from the forge in the background. The `log` tab uses a local `git log` — graph and merge-base dimming included — whenever the head commit is already in the object store (a same-repo PR off a fetched remote), falling back to a flat forge-fetched commit list otherwise.
 
 Requires `gh` (GitHub), `glab` (GitLab), or an equivalent CLI installed and authenticated; see [forge platform](@/config.md#forge-platform) for Gitea, Azure DevOps, and other supported platforms.
 
@@ -161,6 +176,10 @@ Usage: <b><span class=c>wt switch</span></b> <span class=c>[OPTIONS]</span> <spa
           Replaces the wt process with the command after switching, giving it full terminal control.
           Useful for launching editors, AI agents, or other interactive tools.
 
+          Without a branch argument, the interactive picker opens and the command runs against the
+          selected worktree — so <b>wt switch -x claude</b> picks a worktree, then launches Claude Code
+          there.
+
           Supports <u>hook template variables</u> (<b>{{ branch }}</b>, <b>{{ worktree_path }}</b>, etc.) and filters. <b>{{</b>
 <b>          base }}</b> and <b>{{ base_worktree_path }}</b> require <b>--create</b>.
 
@@ -195,6 +214,9 @@ Usage: <b><span class=c>wt switch</span></b> <span class=c>[OPTIONS]</span> <spa
       <b><span class=c>--remotes</span></b>
           Include remote branches
 
+      <b><span class=c>--prs</span></b>
+          Include open PRs/MRs
+
 <b><span class=g>Automation:</span></b>
       <b><span class=c>--no-hooks</span></b>
           Skip hooks
@@ -215,9 +237,13 @@ Usage: <b><span class=c>wt switch</span></b> <span class=c>[OPTIONS]</span> <spa
       <b><span class=c>--config</span></b><span class=c> &lt;path&gt;</span>
           User config file path
 
+      <b><span class=c>--config-set</span></b><span class=c> &lt;toml&gt;</span>
+          Override config with inline TOML, e.g. --config-set list.full=true (repeatable)
+
   <b><span class=c>-v</span></b>, <b><span class=c>--verbose</span></b><span class=c>...</span>
           Verbose output (-v: info logs + hook/alias template variables on stderr; -vv: also debug
-          logs and raw subprocess output written to .git/wt/logs/)
+          logs and raw subprocess output written to .git/wt/logs/). Set WORKTRUNK_VERBOSE=0|1|2 to
+          apply the same level everywhere — including shell completion, which no flag can reach
 
   <b><span class=c>-y</span></b>, <b><span class=c>--yes</span></b>
           Skip approval prompts

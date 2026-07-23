@@ -12,11 +12,11 @@ Worktrunk ships a plugin for each supported agent CLI. What a plugin provides de
 | Capability | Claude Code | Codex | OpenCode | Gemini CLI |
 |---|:-:|:-:|:-:|:-:|
 | Configuration skill | ✓ | ✓ |  | ✓ |
-| Activity tracking (🤖/💬 in `wt list`) | ✓ |  | ✓ | ✓ |
+| Activity tracking (🤖/💬 in `wt list`) | ✓ | ✓ | ✓ | ✓ |
 | Worktree isolation | ✓ |  |  |  |
 | `/wt-switch-create` command | ✓ |  |  |  |
 
-The configuration skill is documentation the agent reads to help set up LLM commits, hooks, and troubleshooting. Activity tracking shows which worktrees have running sessions. Worktree isolation needs worktree-lifecycle hooks and `/wt-switch-create` needs session working-directory switching — both Claude Code-only, so Codex, OpenCode, and Gemini users invoke `wt switch --create` and `wt remove` directly. Codex omits activity tracking because its hooks have no turn-end event, so a 🤖 marker could never clear back to 💬.
+The configuration skill is documentation the agent reads to help set up LLM commits, hooks, and troubleshooting. Activity tracking shows which worktrees have running sessions. Worktree isolation needs worktree-lifecycle hooks and `/wt-switch-create` needs session working-directory switching — both Claude Code-only, so Codex, OpenCode, and Gemini users invoke `wt switch --create` and `wt remove` directly. Codex tracks activity through its own turn-end (`Stop`) hook, but has no session-exit event, so a marker persists after a Codex session ends until the next session or a manual `wt config state marker clear`.
 
 ## Installation
 
@@ -63,17 +63,17 @@ Claude Code is designed to load the skill automatically when it detects worktrun
 
 ## Activity tracking
 
-The Claude Code, OpenCode, and Gemini plugins track agent sessions with status markers in `wt list`:
+The Claude Code, Codex, OpenCode, and Gemini plugins track agent sessions with status markers in `wt list`:
 
 <!-- ⚠️ AUTO-GENERATED from tests/snapshots/integration__integration_tests__list__list_with_user_marker.snap — edit source to update -->
 
 {% terminal(cmd="wt list") %}
 <span class="cmd">wt list</span>
-  <b>Branch</b>       <b>Status</b>        <b>HEAD±</b>    <b>main↕</b>  <b>Remote⇅</b>  <b>Path</b>                 <b>Commit</b>    <b>Age</b>   <b>Message</b>
-@ main             <span class=d>^</span><span class=d>⇡</span>                         <span class=g>⇡1</span>      .                    <span class=d>33323bc1</span>  <span class=d>1d</span>    <span class=d>Initial commit</span>
-+ feature-api      <span class=d>↑</span> 🤖              <span class=g>↑1</span>               ../repo.feature-api  <span class=d>70343f03</span>  <span class=d>1d</span>    <span class=d>Add REST API endpoints</span>
-+ review-ui      <span class=c>?</span> <span class=d>↑</span> 💬              <span class=g>↑1</span>               ../repo.review-ui    <span class=d>a585d6ed</span>  <span class=d>1d</span>    <span class=d>Add dashboard component</span>
-+ wip-docs       <span class=c>?</span> <span class=d>–</span>                                  ../repo.wip-docs     <span class=d>33323bc1</span>  <span class=d>1d</span>    <span class=d>Initial commit</span>
+  <b>Branch</b>       <b>Status</b>        <b>HEAD±</b>    <b>main↕</b>     <b>main…±</b>  <b>Remote⇅</b>  <b>Path</b>                 <b>Commit</b>    <b>Age</b>   <b>Message</b>
+@ main             <span class=d>^</span><span class=d>⇡</span>                                    <span class=g>⇡1</span>      .                    <span class=d>33323bc1</span>  <span class=d>1d</span>    <span class=d>Initial commit</span>
++ feature-api      <span class=d>↑</span> 🤖              <span class=g>↑1</span>        <span class=g>+1</span>                ../repo.feature-api  <span class=d>70343f03</span>  <span class=d>1d</span>    <span class=d>Add REST API endpoints</span>
++ review-ui      <span class=c>?</span> <span class=d>↑</span> 💬              <span class=g>↑1</span>        <span class=g>+1</span>                ../repo.review-ui    <span class=d>a585d6ed</span>  <span class=d>1d</span>    <span class=d>Add dashboard component</span>
++ wip-docs       <span class=c>?</span> <span class=d>–</span>                                             ../repo.wip-docs     <span class=d>33323bc1</span>  <span class=d>1d</span>    <span class=d>Initial commit</span>
 
 <span class=d>○</span> <span class=d>Showing 4 worktrees, 2 with changes, 2 ahead</span>
 {% end %}
@@ -83,7 +83,7 @@ The Claude Code, OpenCode, and Gemini plugins track agent sessions with status m
 - 🤖 — agent is working
 - 💬 — agent is waiting or idle
 
-The plugin clears the marker when a session ends. A stale marker can remain if the agent process is killed before its session-end hook runs; `wt config state marker clear` removes a marker manually.
+The Claude Code, OpenCode, and Gemini plugins clear the marker when a session ends. A stale marker can remain if the agent process is killed before its session-end hook runs. Codex exposes no session-exit event, so its marker always persists after a session ends. In every case, `wt config state marker clear` removes a marker manually.
 
 ### Manual status markers
 
@@ -109,7 +109,7 @@ Claude Code agents can run in isolated worktrees (`isolation: "worktree"`). By d
 
 <code>~/w/myproject.feature-auth  !🤖  @<span style='color:#0a0'>+42</span> <span style='color:#a00'>-8</span>  <span style='color:#0a0'>↑3</span>  <span style='color:#0a0'>⇡1</span>  <span style='color:#0a0'>#3035</span>  Opus  🌔 65%  <span style='color:#a70'>1.4×(10am–3pm)</span></code>
 
-When Claude Code provides context window usage via stdin JSON, a moon phase gauge appears (🌕→🌑 as context fills). A yellow `<n>×(<window>)` segment appears when Claude's 5-hour or weekly rate limit is on track to be hit before reset — `1.4×(10am–3pm)` reads as 1.4× the pace that would exactly fill that window. Above 90% used it shows usage instead of pace — `93%(10am–3pm)` — near the cap, how much is left matters more than how fast it's going.
+When Claude Code provides context window usage via stdin JSON, a moon phase gauge appears (🌕→🌑 as context fills). A `<n>×(<window>)` segment appears when Claude's 5-hour or weekly rate limit is on track to be hit before reset — `1.4×(10am–3pm)` reads as 1.4× the pace that would exactly fill that window. Its colour deepens with severity — dim, then dim-yellow, then yellow — as more of the window would be spent locked out at the cap, so a fast pace that would only tip over near the reset stays dim. Above 90% used it shows usage instead of pace — `93%(10am–3pm)` — near the cap, how much is left matters more than how fast it's going.
 
 <figure class="demo">
 <picture>

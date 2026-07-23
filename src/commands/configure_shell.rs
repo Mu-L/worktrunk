@@ -333,11 +333,13 @@ pub fn handle_configure_shell(
     //
     // We check when:
     // - User explicitly runs `install zsh` (they clearly want zsh integration)
-    // - User runs `install` (all shells) AND their $SHELL is zsh (they use zsh daily)
+    // - User runs `install` (all shells) AND their current shell (process
+    //   tree, falling back to $SHELL) is zsh (they use zsh daily)
     //
     // We skip if:
-    // - User runs `install` but their $SHELL is bash/fish (they may be configuring
-    //   zsh for occasional use; don't nag about their non-primary shell)
+    // - User runs `install` but their current shell is bash/fish (they may be
+    //   configuring zsh for occasional use; don't nag about their non-primary
+    //   shell)
     // - Zsh was already configured (AlreadyExists) - they've seen this before
     let zsh_was_configured = result
         .configured
@@ -897,7 +899,7 @@ fn prompt_yes_no() -> Result<bool, String> {
 }
 
 /// Fish completion content - finds command in PATH, with WORKTRUNK_BIN as optional override
-fn fish_completion_content(cmd: &str) -> String {
+pub(crate) fn fish_completion_content(cmd: &str) -> String {
     format!(
         r#"# worktrunk completions for fish
 complete --keep-order --exclusive --command {cmd} --arguments "(test -n \"\$WORKTRUNK_BIN\"; or set -l WORKTRUNK_BIN (type -P {cmd} 2>/dev/null); and COMPLETE=fish \$WORKTRUNK_BIN -- (commandline --current-process --tokenize --cut-at-cursor) (commandline --current-token))"

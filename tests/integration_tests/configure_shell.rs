@@ -1755,6 +1755,11 @@ mod pty_tests {
         cmd.env("WORKTRUNK_TEST_FISH_INSTALLED", "0");
         cmd.env("WORKTRUNK_TEST_POWERSHELL_INSTALLED", "0");
         cmd.env("WORKTRUNK_TEST_NUSHELL_ENV", "0");
+        // Disable the process-tree shell walk so detection keys on SHELL:
+        // the real ancestry here is the test harness and whatever shell runs
+        // it (zsh on a dev box, bash on CI), which would flip the zsh-only
+        // compinit/restart output between environments.
+        cmd.env("WORKTRUNK_TEST_PARENT_SHELL", "");
         cmd.env("SHELL", "/bin/zsh");
         // Skip the compinit probe and force the advisory to appear. The probe spawns
         // `zsh -ic` which triggers global zshrc configs that can produce "insecure
@@ -1876,6 +1881,9 @@ mod pty_tests {
         cmd.env("WORKTRUNK_TEST_FISH_INSTALLED", "0");
         cmd.env("WORKTRUNK_TEST_POWERSHELL_INSTALLED", "0");
         cmd.env("WORKTRUNK_TEST_NUSHELL_ENV", "0");
+        // Disable the process-tree shell walk so detection keys on SHELL
+        // (see exec_install_in_pty).
+        cmd.env("WORKTRUNK_TEST_PARENT_SHELL", "");
         cmd.env("SHELL", "/bin/zsh");
 
         let (output, exit_code) = exec_cmd_in_pty_prompted(cmd, &["n\n"], "[y/N");
@@ -2410,7 +2418,11 @@ fn test_nushell_install_target_is_a_vendor_autoload_dir(repo: TestRepo, temp_hom
     // Ask the same `nu` (HOME isolated to temp_home) where it autoloads vendor
     // files, then confirm worktrunk's wrapper landed in one of those dirs.
     let listing = std::process::Command::new("nu")
-        .args(["-c", "$nu.vendor-autoload-dirs | str join (char newline)"])
+        .args([
+            "--no-config-file",
+            "-c",
+            "$nu.vendor-autoload-dirs | str join (char newline)",
+        ])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .output()

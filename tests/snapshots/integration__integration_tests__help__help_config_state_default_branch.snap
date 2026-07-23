@@ -26,6 +26,7 @@ info:
     WORKTRUNK_TEST_GEMINI_INSTALLED: "0"
     WORKTRUNK_TEST_NUSHELL_ENV: "0"
     WORKTRUNK_TEST_OPENCODE_INSTALLED: "0"
+    WORKTRUNK_TEST_PARENT_SHELL: ""
     WORKTRUNK_TEST_POWERSHELL_ENV: "0"
     WORKTRUNK_TEST_POWERSHELL_INSTALLED: "0"
     WORKTRUNK_TEST_SKIP_URL_HEALTH_CHECK: "1"
@@ -54,8 +55,11 @@ Usage: [1m[36mwt config state default-branch[0m [36m[OPTIONS][0m [36m[COMM
       [1m[36m--config[0m[36m [0m[36m<path>[0m
           User config file path
 
+      [1m[36m--config-set[0m[36m [0m[36m<toml>[0m
+          Override config with inline TOML, e.g. --config-set list.full=true (repeatable)
+
   [1m[36m-v[0m, [1m[36m--verbose[0m[36m...[0m
-          Verbose output (-v: info logs + hook/alias template variables on stderr; -vv: also debug logs and raw subprocess output written to .git/wt/logs/)
+          Verbose output (-v: info logs + hook/alias template variables on stderr; -vv: also debug logs and raw subprocess output written to .git/wt/logs/). Set WORKTRUNK_VERBOSE=0|1|2 to apply the same level everywhere — including shell completion, which no flag can reach
 
   [1m[36m-y[0m, [1m[36m--yes[0m
           Skip approval prompts
@@ -79,7 +83,7 @@ Worktrunk detects the default branch automatically:
 3. [1mRemote query[0m — If not cached, queries [2mgit ls-remote[0m — typically 100ms–2s
 4. [1mLocal inference[0m — If no remote, infers from local branches
 
-Once detected, the result is cached in [2mworktrunk.default-branch[0m for fast access.
+Once detected, the result is cached in [2mworktrunk.default-branch[0m for fast access. The cache isn't re-validated on every command, so a later change to [2morigin/HEAD[0m — a renamed default branch followed by [2mgit remote set-head origin -a[0m — isn't picked up automatically. [2mwt config state[0m flags the drift when the cached value differs from the remote's local HEAD; [2mset[0m adopts the new branch and [2mclear[0m re-detects.
 
 The local inference fallback uses these heuristics in order:
 - If only one local branch exists, uses it

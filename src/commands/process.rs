@@ -199,7 +199,8 @@ pub fn spawn_detached(
 ) -> anyhow::Result<std::path::PathBuf> {
     let (log_path, log_file) = create_detach_log(repo, branch, hook_log)?;
 
-    log::debug!(
+    tracing::debug!(
+        command = %command,
         "$ {} (detached, logging to {})",
         command,
         log_path.file_name().unwrap_or_default().to_string_lossy()
@@ -356,7 +357,8 @@ pub fn spawn_detached_exec(
 ) -> anyhow::Result<std::path::PathBuf> {
     let (log_path, log_file) = create_detach_log(repo, branch, hook_log)?;
 
-    log::debug!(
+    tracing::debug!(
+        program = %program.display(),
         "$ {} {} (detached, logging to {})",
         program.display(),
         args.join(" "),
@@ -489,6 +491,12 @@ fn spawn_detached_exec_windows(
 /// step is best-effort and additive — failures log at debug level and the
 /// `wt remove` operation proceeds regardless.
 ///
+/// It DOES delay process exit — the shell wrapper waits on it. The daemon
+/// reap enumerates fsmonitor daemons machine-wide with one sequential ~50ms
+/// `lsof` per daemon (measured: 115 daemons → ~5.8s of post-output latency;
+/// see the `internal-sweep` / `enumerate-fsmonitor-daemons` trace spans and
+/// benches/CLAUDE.md § Recording `wt remove` / `wt step prune` staging).
+///
 /// Steps:
 ///
 /// 1. [`sweep_stale_trash`] — delete stale `.git/wt/trash/` entries left by
@@ -499,6 +507,7 @@ fn spawn_detached_exec_windows(
 ///    (plain `git worktree remove`, manual `rm -rf`, a crashed `wt`); the
 ///    `wt remove` source itself stops the daemon synchronously.
 pub fn run_internal_sweep(repo: &Repository) {
+    let _span = worktrunk::trace::Span::new("internal-sweep");
     sweep_stale_trash(repo);
     worktrunk::git::fsmonitor::reap_orphan_fsmonitor_daemons(repo);
 }
@@ -539,7 +548,7 @@ pub fn sweep_stale_trash(repo: &Repository) {
         &HookLog::shared(InternalOp::TrashSweep),
         None,
     ) {
-        log::debug!("Failed to spawn stale trash sweep: {e}");
+        tracing::debug!(error = %e, "Failed to spawn stale trash sweep: {e}");
     }
 }
 

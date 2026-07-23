@@ -38,11 +38,31 @@ fn help_table_skin() -> MadSkin {
     skin
 }
 
+/// How fenced code blocks render: quoted in the house gutter (the default, for
+/// help pages and the summary tab) or flush and dim with no gutter. The picker's
+/// `pr` description pane renders the whole body gutter-free, so it picks `Flush`.
+#[derive(Clone, Copy, PartialEq)]
+enum CodeBlocks {
+    Gutter,
+    Flush,
+}
+
 /// Render markdown in help text to ANSI with minimal styling (green headers only)
 ///
 /// If `width` is provided, prose text is wrapped to that width. Tables, code blocks,
 /// and headers are never wrapped (tables need full-width rows for alignment).
 pub(crate) fn render_markdown_in_help_with_width(help: &str, width: Option<usize>) -> String {
+    render_markdown(help, width, CodeBlocks::Gutter)
+}
+
+/// Like [`render_markdown_in_help_with_width`], but renders fenced code blocks
+/// flush and dim rather than quoted in the house gutter — for the picker's `pr`
+/// description pane, which renders the whole body gutter-free and flush-left.
+pub(crate) fn render_markdown_flush(help: &str, width: Option<usize>) -> String {
+    render_markdown(help, width, CodeBlocks::Flush)
+}
+
+fn render_markdown(help: &str, width: Option<usize>, code_blocks: CodeBlocks) -> String {
     let green = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
 
     let mut result = String::new();
@@ -85,37 +105,58 @@ pub(crate) fn render_markdown_in_help_with_width(help: &str, width: Option<usize
                 code_block_lines.clear();
                 in_code_block = true;
             } else {
-                // Closing fence — render collected code block with gutter
+                // Closing fence — render the collected code block. Flush mode
+                // dims each line with no gutter and no language-specific
+                // highlighting, so the description pane stays gutter-free and
+                // flush-left; the gutter mode quotes it in the house bar.
                 let content = code_block_lines.join("\n");
-                let formatted = match code_block_lang.as_str() {
-                    "toml" => format_toml(&content),
-                    "console" => {
-                        // Strip `$ ` prompt from console blocks for copy-paste.
-                        // The prefix is preserved in source for web docs.
-                        let stripped = content
-                            .lines()
-                            .map(|l| l.strip_prefix("$ ").unwrap_or(l))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        // Captured `wt list` tables (chop_next_block) are chopped to
-                        // width; hand-authored command sessions still word-wrap.
-                        if chop_next_block {
-                            format_bash_with_gutter_chopped(&stripped)
-                        } else {
-                            format_bash_with_gutter(&stripped)
+                let formatted = if code_blocks == CodeBlocks::Flush {
+                    // Flush code feeds the gutter-free `pr`/comments panes. Wrap each
+                    // line to width (word-wrap, preserving indent) and dim every
+                    // resulting piece, so a long line doesn't overflow the pane — and,
+                    // when the comments pane re-quotes this in the house gutter, every
+                    // wrapped piece already fits, keeping the gutter's own wrap a no-op
+                    // and the dim consistent rather than landing only on the first line.
+                    let dim = Style::new().dimmed();
+                    code_block_lines
+                        .iter()
+                        .flat_map(|l| {
+                            width.map_or_else(|| vec![l.to_string()], |w| wrap_styled_text(l, w))
+                        })
+                        .map(|piece| format!("{dim}{piece}{dim:#}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    match code_block_lang.as_str() {
+                        "toml" => format_toml(&content),
+                        "console" => {
+                            // Strip `$ ` prompt from console blocks for copy-paste.
+                            // The prefix is preserved in source for web docs.
+                            let stripped = content
+                                .lines()
+                                .map(|l| l.strip_prefix("$ ").unwrap_or(l))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            // Captured `wt list` tables (chop_next_block) are chopped to
+                            // width; hand-authored command sessions still word-wrap.
+                            if chop_next_block {
+                                format_bash_with_gutter_chopped(&stripped)
+                            } else {
+                                format_bash_with_gutter(&stripped)
+                            }
                         }
-                    }
-                    "bash" | "sh" => format_bash_with_gutter(&content),
-                    _ => {
-                        // Dim the content before adding gutter (format_with_gutter
-                        // doesn't style text; bash/toml formatters handle their own)
-                        let dim = Style::new().dimmed();
-                        let dimmed = code_block_lines
-                            .iter()
-                            .map(|l| format!("{dim}{l}{dim:#}"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format_with_gutter(&dimmed, None)
+                        "bash" | "sh" => format_bash_with_gutter(&content),
+                        _ => {
+                            // Dim the content before adding gutter (format_with_gutter
+                            // doesn't style text; bash/toml formatters handle their own)
+                            let dim = Style::new().dimmed();
+                            let dimmed = code_block_lines
+                                .iter()
+                                .map(|l| format!("{dim}{l}{dim:#}"))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            format_with_gutter(&dimmed, None)
+                        }
                     }
                 };
                 result.push_str(&formatted);
@@ -445,10 +486,10 @@ fn colorize_status_symbols(text: &str) -> String {
     result = replace_dim(result, "⤵", warning);
     result = replace_dim(result, "✗", warning);
 
-    // Worktree state: BranchWorktreeMismatch (red), Prunable/Locked (yellow)
-    result = replace_dim(result, "⚑", error);
+    // Worktree state: Prunable/Locked (yellow), BranchWorktreeMismatch (dim yellow)
     result = replace_dim(result, "⊟", warning);
     result = replace_dim(result, "⊞", warning);
+    result = replace_dim(result, "⚑", warning.dimmed());
 
     // CI legend samples: replace dimmed `#` followed by a color name
     let dimmed_hash = format!("{dim}#{dim:#}");
@@ -686,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_render_markdown_in_help_table() {
-        let result = render_markdown_in_help("| A | B |\n| - | - |\n| 1 | 2 |");
+        let result = render_markdown_in_help("| A | B |\n| --- | --- |\n| 1 | 2 |");
         assert_snapshot!(result, @"
          A   B  
         ─── ─── 
@@ -813,6 +854,33 @@ mod tests {
         A   B  
         1   2
         ");
+    }
+
+    #[test]
+    fn test_render_table_ragged_narrow_does_not_panic() {
+        // Regression for #3407. termimad <= 0.34.1 panicked with an out-of-bounds
+        // index when a *ragged* table — a row with more cells than the header —
+        // was rendered at a narrow width: its column fitter (`Table::fix_columns`
+        // in termimad's src/tbl.rs) took an error path that skipped cell padding,
+        // then indexed past the shorter row. PR-comment markdown is untrusted and
+        // can contain such a table, and the picker renders comment bodies through
+        // here, so this used to abort `wt switch`. Fixed upstream in termimad
+        // 0.35.1 (Canop/termimad#77); this guards against a regression or an
+        // accidental downgrade — the render must complete rather than panicking.
+        let lines = vec![
+            "| Key | Value |",
+            "| --- | --- |",
+            "| alpha | beta | gamma | delta | epsilon | zeta |",
+        ];
+        // The bug manifested as an out-of-bounds panic *during* rendering in the
+        // narrow-width band (16/20/24). termimad wraps cells hard and drops
+        // columns to fit width 20, so we don't assert on specific cell text —
+        // reaching this line at all is the proof the panic is gone.
+        let result = render_table(&lines, Some(20));
+        assert!(
+            !result.is_empty(),
+            "render should complete and produce output"
+        );
     }
 
     #[test]

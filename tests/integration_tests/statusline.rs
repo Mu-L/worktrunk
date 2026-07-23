@@ -24,6 +24,12 @@ fn run_statusline_from_dir(
     // Apply repo's git environment
     repo.configure_wt_cmd(&mut cmd);
 
+    // Pin the timezone so any wall-clock segment (the claude-code statusline
+    // renders `chrono::Local`) is deterministic across machines — not only in
+    // the `run_statusline_with_locale` helper. `LC_ALL=C` is already pinned
+    // globally by the test harness.
+    cmd.env("TZ", "UTC");
+
     if stdin_json.is_some() {
         cmd.stdin(Stdio::piped());
     }
@@ -454,6 +460,72 @@ fn test_statusline_json_basic(repo: TestRepo) {
         item["commit"]["timestamp"].as_i64().unwrap() > 0,
         "commit.timestamp should be populated from git log"
     );
+}
+
+/// `[list] json-schema = 2` switches the statusline JSON to the envelope,
+/// with the same single-item contract as the schema-1 array. An unset key
+/// stays silent here — the statusline surface suppresses warnings.
+#[rstest]
+fn test_statusline_json_schema_2(repo: TestRepo) {
+    repo.write_test_config("[list]\njson-schema = 2\n");
+
+    let output = run_statusline(&repo, &["--format=json"], None);
+    let parsed: Value = serde_json::from_str(&output).expect("should be valid JSON");
+
+    assert_eq!(parsed["schema"], 2);
+    assert_eq!(
+        parsed["collected"],
+        serde_json::json!({"ci": true, "summary": false}),
+        "statusline collects with full gates, no summaries"
+    );
+    let items = parsed["items"].as_array().expect("envelope items");
+    assert_eq!(items.len(), 1, "one item: the current worktree");
+
+    let item = &items[0];
+    assert_eq!(item["branch"], "main");
+    assert!(item["worktree"]["current"].as_bool().unwrap());
+    assert!(item["worktree"]["main"].as_bool().unwrap());
+    assert!(
+        item.get("default_branch").is_none(),
+        "the default branch row carries no relation to itself"
+    );
+    assert!(item["head"]["sha"].is_string());
+    assert!(
+        item["display"]["statusline"].is_string(),
+        "pre-rendered statusline lives under display"
+    );
+}
+
+/// Outside a worktree the JSON surface emits an empty result in the
+/// selected schema, and the schema-2 empty envelope skips default-branch
+/// detection (no `default_branch` key — nothing to relate to).
+#[rstest]
+fn test_statusline_json_outside_worktree(repo: TestRepo) {
+    let git_dir = repo.root_path().join(".git");
+
+    let output = run_statusline_from_dir(&repo, &["--format=json"], None, &git_dir);
+    assert_eq!(output.trim(), "[]", "schema 1 empty result is a bare array");
+
+    repo.write_test_config("[list]\njson-schema = 2\n");
+    let output = run_statusline_from_dir(&repo, &["--format=json"], None, &git_dir);
+    let parsed: Value = serde_json::from_str(&output).expect("should be valid JSON");
+    assert_eq!(parsed["schema"], 2);
+    assert_eq!(parsed["items"], serde_json::json!([]));
+    assert!(
+        parsed["repo"].get("default_branch").is_none(),
+        "item-less path must not attempt default-branch detection"
+    );
+}
+
+/// An invalid `[list] json-schema` degrades to schema 1 silently here —
+/// the statusline surface suppresses warnings, so a config typo must not
+/// corrupt the prompt.
+#[rstest]
+fn test_statusline_json_invalid_schema_degrades_silently(repo: TestRepo) {
+    repo.write_test_config("[list]\njson-schema = 7\n");
+    let output = run_statusline(&repo, &["--format=json"], None);
+    let parsed: Value = serde_json::from_str(&output).expect("should be valid JSON");
+    assert!(parsed.is_array(), "degrades to the schema 1 array");
 }
 
 #[rstest]
@@ -887,4 +959,30 @@ fn test_statusline_rate_limit_drops_at_narrow_width(repo: TestRepo) {
     claude_code_snapshot_settings().bind(|| {
         assert_snapshot!("rate_limit_drops_at_narrow_width", out);
     });
+}
+
+#[rstest]
+fn test_statusline_zero_columns_renders_untruncated(repo: TestRepo) {
+    // Regression: `COLUMNS=0` is an absurd width. It must be treated as "no
+    // detectable width" and fall through to the untruncated render — not
+    // collapse the content budget to zero (after the statusline subtracts its
+    // UI margin) and drop every segment. Compare against a wide terminal,
+    // which also renders untruncated: the two must be identical and non-empty.
+    let json = build_claude_code_json(
+        repo.root_path(),
+        Some("Opus"),
+        Some(42.0),
+        TEST_NOW_THU_1PM,
+        &[("five_hour", 80.0, 2 * 3600)],
+    );
+    let zero = run_statusline_at_time(&repo, &json, TEST_NOW_THU_1PM, Some(0));
+    let wide = run_statusline_at_time(&repo, &json, TEST_NOW_THU_1PM, Some(500));
+    assert!(
+        !zero.trim().is_empty(),
+        "COLUMNS=0 must not collapse the statusline to empty"
+    );
+    assert_eq!(
+        zero, wide,
+        "COLUMNS=0 should render untruncated, identical to a wide terminal"
+    );
 }

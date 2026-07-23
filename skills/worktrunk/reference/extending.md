@@ -20,17 +20,7 @@ Hooks and aliases live in the same TOML config and share the [template engine](h
 
 ## Hooks
 
-Ten hooks cover five lifecycle events:
-
-| Event | `pre-` (blocking) | `post-` (background) |
-|-------|-------------------|---------------------|
-| **switch** | `pre-switch` | `post-switch` |
-| **start** | `pre-start` | `post-start` |
-| **commit** | `pre-commit` | `post-commit` |
-| **merge** | `pre-merge` | `post-merge` |
-| **remove** | `pre-remove` | `post-remove` |
-
-`pre-*` hooks block: failure aborts the operation. `post-*` hooks run in the background.
+Ten hooks cover five lifecycle events — switch, start, commit, merge, remove — each with a blocking `pre-` variant (failure aborts the operation) and a background `post-` variant. [`wt hook`](https://worktrunk.dev/hook/#hook-types) maps each hook to its timing and typical uses.
 
 ```toml
 [pre-start]
@@ -87,6 +77,8 @@ wt s 'has a space'
 For indexing (`{{ args[0] }}`), looping, and counting, see [Passing values](https://worktrunk.dev/hook/#passing-values).
 
 Tokens after `--` forward unconditionally, bypassing any binding. Writing `wt deploy -- --branch=foo` forwards the literal `--branch=foo` to `{{ args }}` even though the template references `{{ branch }}`.
+
+An alias that forwards `{{ args }}` to a `wt` command — like `co = "wt switch {{ args }}"` or `cm = "wt step commit {{ args }}"` — inherits that command's argument and flag completion, so `wt co <Tab>` completes branches the same way `wt switch <Tab>` does.
 
 ### Inspecting and previewing
 
@@ -213,6 +205,7 @@ Arguments pass through verbatim, stdio is inherited, and the child's exit code p
 ### Examples
 
 - [`worktrunk-sync`](https://github.com/pablospe/worktrunk-sync): rebases stacked worktree branches in the dependency order inferred from git history. Install with `cargo install worktrunk-sync`, then run as `wt sync`.
+- [`workz`](https://github.com/rohansx/workz): provisions the current worktree with a collision-free port range plus its own database and Docker Compose project, merged into `.env.local`, so parallel worktrees don't clash. Install with `cargo install workz`, drop its [`wt-workz`](https://github.com/rohansx/workz/blob/main/examples/wt-workz) adapter on `PATH`, then run as `wt workz`.
 
 ## Reference: hooks vs. aliases
 

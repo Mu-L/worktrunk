@@ -23,6 +23,7 @@ use serde::Serialize;
 use worktrunk::git::{GitRepoInfo, LineDiff, Repository};
 
 use super::ci_status::{CiSource, PrStatus, ReviewState};
+use super::custom_columns::ResolvedCustomColumn;
 use super::model::{ItemKind, ListItem, UpstreamStatus};
 
 /// JSON output for a single list item
@@ -117,6 +118,11 @@ pub struct JsonItem {
     /// Custom variables stored via `wt config state vars`
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, String>,
+
+    /// Rendered `[list.custom-columns]` values, keyed by column header.
+    /// Empty cells are omitted.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub columns: BTreeMap<String, String>,
 }
 
 /// Commit information
@@ -259,8 +265,9 @@ pub struct JsonCi {
 impl JsonItem {
     /// Convert a ListItem to the new JSON structure
     ///
-    /// `all_vars` is pre-fetched vars data for all branches (from `repo.all_vars_entries()`),
-    /// avoiding N+1 git process spawns. Entries are moved out via `.remove()` to avoid cloning.
+    /// `all_vars` is pre-fetched vars data for all branches (from
+    /// `repo.all_vars_from_snapshot()`), avoiding N+1 git process spawns.
+    /// Entries are moved out via `.remove()` to avoid cloning.
     ///
     /// `repo` is repository metadata (from `repo.repo_info()`). It is repo-wide, so the caller
     /// computes it once and passes the same value to every item.
@@ -269,6 +276,7 @@ impl JsonItem {
         all_vars: &mut HashMap<String, BTreeMap<String, String>>,
         repo: Option<&GitRepoInfo>,
         ci_provider_override: Option<&str>,
+        custom_columns: &[ResolvedCustomColumn],
     ) -> Self {
         let (kind_str, worktree_data) = match &item.kind {
             ItemKind::Worktree(data) => ("worktree", Some(data.as_ref())),
@@ -306,7 +314,7 @@ impl JsonItem {
 
         // Working tree: read directly from `WorktreeData`, not from
         // `status_symbols.working_tree`. `status_symbols` may be set by
-        // the metadata-only fallback in `compute_status_symbols` (locked
+        // the metadata-only Gate 2 of `refresh_status_symbols` (locked
         // / prunable / mismatched worktrees) carrying a default
         // `WorkingTreeStatus`. The JSON output must reflect whether
         // `WorkingTreeDiff` actually loaded the field — collapsing
@@ -380,14 +388,13 @@ impl JsonItem {
         let symbols = Some(format_raw_symbols(&item.status_symbols)).filter(|s| !s.is_empty());
 
         // Per-branch vars data (pre-fetched, moved out to avoid cloning)
-        let vars = item
-            .branch
-            .as_deref()
-            .and_then(|b| all_vars.remove(b))
-            .unwrap_or_default();
+        let vars = super::json_v2::take_vars(item.branch.as_deref(), all_vars);
 
         // Summary: flatten Option<Option<String>> → Option<String>
         let summary = item.summary.as_ref().and_then(|s| s.clone());
+
+        // Rendered custom column values, keyed by header; empty cells omitted
+        let columns = super::json_v2::columns_map(custom_columns, &item.custom_values);
 
         JsonItem {
             branch: item.branch.clone(),
@@ -413,6 +420,7 @@ impl JsonItem {
             statusline,
             symbols,
             vars,
+            columns,
         }
     }
 }
@@ -471,9 +479,7 @@ impl JsonCi {
     /// a self-hosted instance whose host can't be auto-detected still report the
     /// right provider.
     pub(crate) fn from_pr_status(pr: &PrStatus, provider_override: Option<&str>) -> Self {
-        let repo = pr.url.as_deref().and_then(|url| {
-            worktrunk::git::remote_ref::repo_info_from_ref_url_with_provider(url, provider_override)
-        });
+        let repo = super::json_v2::pr_target_repo(pr.url.as_deref(), provider_override);
         Self {
             status: pr.ci_status.into(),
             source: pr.source,
@@ -483,6 +489,12 @@ impl JsonCi {
             repo,
             url: pr.url.clone(),
             review_state: pr.review_state,
+            // TODO(json-pr-title-body): `PrStatus` now carries `title`/`body`
+            // and `comment_count` (for the picker's `pr` preview pane), but
+            // they're deliberately not surfaced here — `wt list --json` stays
+            // scoped to CI/review status. Add them (with
+            // `skip_serializing_if = "Option::is_none"` plus a row in the
+            // docs/content/list.md ci-object table) if a JSON consumer needs them.
         }
     }
 }
@@ -493,7 +505,9 @@ impl JsonCi {
 /// simply absent from the output string, not replaced by a placeholder.
 /// This matches the per-symbol atomic model: machine consumers see only the
 /// symbols that have been computed so far.
-fn format_raw_symbols(symbols: &super::model::StatusSymbols) -> String {
+///
+/// Shared with `json_v2` (the `display.symbols` field).
+pub(crate) fn format_raw_symbols(symbols: &super::model::StatusSymbols) -> String {
     let mut result = String::new();
 
     // Working tree symbols (gate 1)
@@ -501,7 +515,7 @@ fn format_raw_symbols(symbols: &super::model::StatusSymbols) -> String {
         result.push_str(&wt.to_symbols());
     }
 
-    // Main state (gate 3) — merged column: ^✗_⊂↕↑↓
+    // Main state (gate 3) — merged column: ^_⊂✗↕↑↓
     if let Some(ms) = symbols.main_state {
         let s = ms.to_string();
         if !s.is_empty() {
@@ -543,9 +557,18 @@ fn format_raw_symbols(symbols: &super::model::StatusSymbols) -> String {
 
 /// Convert a list of ListItems to JSON output
 ///
-/// Fetches all vars data in a single git call, then distributes per-branch.
-pub fn to_json_items(items: &[ListItem], repo: &Repository) -> Vec<JsonItem> {
-    let mut all_vars = repo.all_vars_entries();
+/// Reads all vars from the bulk config snapshot (no subprocess, and —
+/// unlike the line-parsed `--get-regexp` read — multiline values survive),
+/// then distributes per-branch. The same source feeds the rendered `columns`
+/// values, so the two fields can't diverge. The snapshot was loaded earlier
+/// in this invocation; an error here means the bulk read failed, in which
+/// case `collect()` already surfaced it, so the empty fallback is dead code.
+pub fn to_json_items(
+    items: &[ListItem],
+    custom_columns: &[ResolvedCustomColumn],
+    repo: &Repository,
+) -> Vec<JsonItem> {
+    let mut all_vars = repo.all_vars_from_snapshot().unwrap_or_default();
     let repo_metadata = repo.repo_info();
     let ci_provider_override = repo.forge_platform_override();
     items
@@ -556,6 +579,7 @@ pub fn to_json_items(items: &[ListItem], repo: &Repository) -> Vec<JsonItem> {
                 &mut all_vars,
                 repo_metadata.as_ref(),
                 ci_provider_override.as_deref(),
+                custom_columns,
             )
         })
         .collect()
@@ -606,9 +630,15 @@ mod tests {
                 ci_status: CiStatus::Passed,
                 source: CiSource::PullRequest,
                 is_stale: false,
+                is_priming: false,
                 url: Some("https://github.com/org/repo/pull/123".to_string()),
                 number: Some(PrRef::pr(123)),
                 review_state: None,
+                title: None,
+                body: None,
+                author: None,
+                comment_count: None,
+                updated_at: None,
             },
             None,
         );
@@ -643,9 +673,15 @@ mod tests {
                 ci_status: CiStatus::Failed,
                 source: CiSource::Branch,
                 is_stale: true,
+                is_priming: false,
                 url: None,
                 number: None,
                 review_state: None,
+                title: None,
+                body: None,
+                author: None,
+                comment_count: None,
+                updated_at: None,
             },
             None,
         );
@@ -670,9 +706,15 @@ mod tests {
                     ci_status,
                     source: CiSource::Branch,
                     is_stale: false,
+                    is_priming: false,
                     url: None,
                     number: None,
                     review_state: None,
+                    title: None,
+                    body: None,
+                    author: None,
+                    comment_count: None,
+                    updated_at: None,
                 },
                 None,
             );
@@ -689,9 +731,15 @@ mod tests {
             ci_status: CiStatus::Passed,
             source: CiSource::PullRequest,
             is_stale: false,
+            is_priming: false,
             url: Some("https://git.example.com/org/repo/pull/7".to_string()),
             number: Some(PrRef::pr(7)),
             review_state: None,
+            title: None,
+            body: None,
+            author: None,
+            comment_count: None,
+            updated_at: None,
         };
 
         let without = JsonCi::from_pr_status(&pr, None);
@@ -717,6 +765,7 @@ mod tests {
             remote: Some("origin".to_string()),
             ahead: 3,
             behind: 2,
+            ..Default::default()
         };
         let branch = Some("feature".to_string());
         let json = upstream_to_json(&upstream, &branch);
@@ -734,6 +783,7 @@ mod tests {
             remote: None,
             ahead: 0,
             behind: 0,
+            ..Default::default()
         };
         let branch = Some("feature".to_string());
         let json = upstream_to_json(&upstream, &branch);
@@ -746,6 +796,7 @@ mod tests {
             remote: Some("origin".to_string()),
             ahead: 1,
             behind: 0,
+            ..Default::default()
         };
         let branch = None;
         let json = upstream_to_json(&upstream, &branch);
@@ -1036,7 +1087,7 @@ mod tests {
         item.summary = Some(Some("Add login page".to_string()));
 
         // repo_url/repo are set when provided, absent (skipped) when None.
-        let json_item = JsonItem::from_list_item(&item, &mut all_vars, None, None);
+        let json_item = JsonItem::from_list_item(&item, &mut all_vars, None, None, &[]);
         assert_eq!(json_item.summary, Some("Add login page".to_string()));
         assert!(json_item.repo_url.is_none());
         assert!(json_item.repo.is_none());
@@ -1050,7 +1101,7 @@ mod tests {
             project: None,
             remote: Some("origin".to_string()),
         };
-        let json_item = JsonItem::from_list_item(&item, &mut all_vars, Some(&repo), None);
+        let json_item = JsonItem::from_list_item(&item, &mut all_vars, Some(&repo), None, &[]);
         assert_eq!(
             json_item.repo_url,
             Some("https://github.com/owner/repo".to_string())
@@ -1066,14 +1117,14 @@ mod tests {
         let mut item = ListItem::new_branch("abc1234".into(), "feature".into());
         // Both "not collected" and "no summary" should be absent in JSON
         assert!(
-            JsonItem::from_list_item(&item, &mut all_vars, None, None)
+            JsonItem::from_list_item(&item, &mut all_vars, None, None, &[])
                 .summary
                 .is_none()
         );
 
         item.summary = Some(None);
         assert!(
-            JsonItem::from_list_item(&item, &mut all_vars, None, None)
+            JsonItem::from_list_item(&item, &mut all_vars, None, None, &[])
                 .summary
                 .is_none()
         );

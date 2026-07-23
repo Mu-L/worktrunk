@@ -380,12 +380,6 @@ pub fn merge_scenario_multi_commit(mut repo: TestRepo) -> (TestRepo, PathBuf) {
 ///
 /// Use this instead of `portable_pty::native_pty_system()` directly to ensure
 /// PTY tests work correctly across platforms.
-///
-/// NOTE: PTY tests are behind the `shell-integration-tests` feature because they can
-/// trigger a nextest bug where its InputHandler cleanup receives SIGTTOU. This happens
-/// when tests spawn interactive shells (zsh -ic, bash -ic) which take control of the
-/// foreground process group. See https://github.com/nextest-rs/nextest/issues/2878
-/// Workaround: run with NEXTEST_NO_INPUT_HANDLER=1. See CLAUDE.md for details.
 pub fn native_pty_system() -> Box<dyn portable_pty::PtySystem> {
     #[cfg(unix)]
     ignore_tty_signals();
@@ -590,6 +584,11 @@ pub fn add_standard_env_redactions(settings: &mut insta::Settings) {
     );
     // OpenCode config directory (platform-independent override for tests)
     settings.add_redaction(".env.OPENCODE_CONFIG_DIR", "[TEST_OPENCODE_CONFIG]");
+    // Claude Code config directory: `set_temp_home_env` pins it to the temp
+    // home's `.claude` for hermeticity, so the value is a per-run temp path that
+    // would leak (and fail the host-path guard) when regenerated under an
+    // ambient CLAUDE_CONFIG_DIR. Redact it like its OpenCode sibling above.
+    settings.add_redaction(".env.CLAUDE_CONFIG_DIR", "[TEST_CLAUDE_CONFIG]");
     // `wt config show --full` tests inject WORKTRUNK_TEST_LATEST_VERSION = the
     // current crate version (so the version-check line reads "Up to date"), which
     // would otherwise churn this `info` block on every release bump. Redact any
