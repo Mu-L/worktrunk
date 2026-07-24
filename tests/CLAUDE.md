@@ -27,7 +27,9 @@ task coverage
 cargo llvm-cov report --show-missing-lines | grep <file>   # authoritative miss list; matches codecov line-for-line
 ```
 
-For each uncovered function, either write a test (integration tests via `assert_cmd_snapshot!` do capture subprocess coverage) or document why it's intentionally untested. If codecov's compare API must be queried directly, `coverage.head` is a `LineType` enum: `0=hit`, `1=miss`, `2=partial`.
+For each uncovered function, either write a test (integration tests via `assert_cmd_snapshot!` do capture subprocess coverage) or document why it's intentionally untested. If codecov's compare API must be queried directly, `coverage.head` is a `LineType` enum: `0=hit`, `1=miss`, `2=partial`, and per-file `.totals.head.diff` (`[files, lines, hits, misses, partials, coverage, …]`) is what reproduces the posted patch percentage — the top-level `totals.base.diff` reports different numbers. Prefer measuring: the API is for disputing a posted check, not a substitute for `task coverage`.
+
+**`skim` fails with E0554 (`#![feature]` on stable):** the local `cargo-llvm-cov` predates 0.7.0, which stopped putting the coverage flags in global `RUSTFLAGS` and started instrumenting only workspace crates. Older versions leak `--cfg=coverage` into every dependency, and `skim` gates a nightly feature on it. Install the version the `code-coverage` job pins rather than working around it (`--no-cfg-coverage` also avoids it; `--no-rustc-wrapper` reinstates it).
 
 **Moved and re-indented lines:** codecov counts every line the diff touches as part of the patch, including one the change only relocated — a `git mv`, or a body re-indented because it moved inside a new wrapper. Pre-existing uncovered lines then count against a patch that changed no behavior. Verify against `main` (under the old path, for a rename): if the lines are identical there, the misses predate the change, and the fix is to say so to the user rather than undo the move.
 
