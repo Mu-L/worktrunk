@@ -22,16 +22,7 @@ sync = 'if [ "{{ target }}" = "main" ]; then git pull && git push; fi'
 # `cargo update --locked` would also fail on dependencies merely behind latest.
 lockfile = "cargo update --workspace --locked"
 pre-commit = "pre-commit run --all-files"
-# No `RUSTFLAGS='-D warnings'` here. The pre-commit step in this same gate runs
-# `cargo clippy --all-targets --all-features -- -D warnings`, which fails on any
-# rustc warning in every target this step builds, over a superset of its
-# features. Setting RUSTFLAGS only added coverage of third-party dependencies,
-# which we don't want to gate on, and RUSTFLAGS is part of cargo's fingerprint:
-# it forked the entire 343-crate graph into a second set of artifacts, ~260 CPU-
-# seconds to prime and a duplicate of `target/debug/deps` to keep. In CI it also
-# shadowed the workflow-level `RUSTFLAGS: -C debuginfo=0`, so the largest build
-# in the run was the one carrying full debug info.
-insta = """cargo insta test --test-runner nextest --dnd --check $([ "$(uname)" = 'Linux' ] && echo '--unreferenced reject') --features shell-integration-tests"""
+insta = """RUSTFLAGS='-D warnings' cargo insta test --test-runner nextest --dnd --check $([ "$(uname)" = 'Linux' ] && echo '--unreferenced reject') --features shell-integration-tests"""
 doctest = "RUSTDOCFLAGS='-Dwarnings' cargo test --doc"
 doc = "RUSTDOCFLAGS='-Dwarnings' cargo doc --no-deps --document-private-items"
 
