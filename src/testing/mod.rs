@@ -243,6 +243,34 @@ pub const TEST_EPOCH: u64 = 1735776000;
 /// Generous to avoid flakiness under CI load; exponential backoff means fast tests when things work.
 const BG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Value for `GIT_ALLOW_PROTOCOL` on every git process a test spawns, whether
+/// directly or as a child of `wt`: local paths and `file://` only, so the
+/// suite cannot reach the wire.
+///
+/// Tests point remotes at real hosts (`https://github.com/test-owner/…`) to
+/// drive forge detection, and `Repository::default_branch()` is allowed to
+/// fall through to `git ls-remote` when neither the worktrunk cache nor
+/// `origin/HEAD` resolves. So a test that never meant to do network work
+/// makes an unbounded connect to whatever host the URL names. Nothing in that
+/// path has a timeout: an unanswered SYN costs ~127 s per address on Linux
+/// (`tcp_syn_retries=6`) and a host with several A/AAAA records is tried in
+/// turn, which is how a 2-second test reaches nextest's 180 s limit.
+///
+/// Denying the transport turns that into an immediate `transport 'https' not
+/// allowed`; detection then falls back to local inference, leaving output
+/// unchanged. The adjacent `GIT_TERMINAL_PROMPT=0` doesn't subsume this: it
+/// only suppresses the credential prompt the host's 401 triggers, so the
+/// request has already gone out by the time it applies.
+const GIT_ALLOWED_PROTOCOLS: &str = "file";
+
+/// Restore git's default protocol set on a command built by
+/// [`configure_git_cmd`], for a caller whose job is to fetch a fixture from
+/// upstream — the real-repo benchmark clone. Grep for this to enumerate
+/// everything that may reach the wire; tests are not among them.
+pub fn allow_network_transports(cmd: &mut Command) {
+    cmd.env_remove("GIT_ALLOW_PROTOCOL");
+}
+
 /// Static environment variables shared by all test isolation helpers.
 ///
 /// These are used by both `configure_cli_command()` (for Command-based tests)
@@ -253,6 +281,10 @@ const BG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// are NOT included here because they depend on the TestRepo instance.
 pub const STATIC_TEST_ENV_VARS: &[(&str, &str)] = &[
     ("CLICOLOR_FORCE", "1"),
+    // Deny network git transports (see GIT_ALLOWED_PROTOCOLS). Host-independent,
+    // so it belongs here rather than in each builder's path-dependent block —
+    // which is what reaches the hand-rolled PTY env builders too.
+    ("GIT_ALLOW_PROTOCOL", GIT_ALLOWED_PROTOCOLS),
     // Terminal width for PTY tests. configure_cli_command() overrides to 500 for longer paths.
     ("COLUMNS", "150"),
     // Deterministic locale settings
@@ -590,6 +622,7 @@ pub fn configure_cli_command(cmd: &mut Command) {
 /// - Deterministic commit timestamps
 /// - Consistent locale settings
 /// - No terminal prompts
+/// - No network transports (`GIT_ALLOWED_PROTOCOLS`)
 ///
 /// # Arguments
 /// * `cmd` - The git Command to configure
@@ -608,6 +641,7 @@ pub fn configure_git_cmd(cmd: &mut Command, git_config_path: &Path) {
     cmd.env("LANG", "C");
     cmd.env("WORKTRUNK_TEST_EPOCH", TEST_EPOCH.to_string());
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_ALLOW_PROTOCOL", GIT_ALLOWED_PROTOCOLS);
 }
 
 /// Configure a `Cmd`-based git command with isolated environment for testing.
@@ -627,6 +661,7 @@ pub fn configure_git_env(cmd: Cmd, git_config_path: &Path) -> Cmd {
         .env("LANG", "C")
         .env("WORKTRUNK_TEST_EPOCH", TEST_EPOCH.to_string())
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", GIT_ALLOWED_PROTOCOLS)
 }
 
 /// Shared interface for test repository fixtures.
@@ -3077,6 +3112,46 @@ fn is_leap_year(year: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A harness-built `git` reaches local paths and nothing else, so no test
+    /// can make an unbounded connect to whatever host a fixture URL names
+    /// (see [`GIT_ALLOWED_PROTOCOLS`]).
+    #[test]
+    fn test_harness_git_allows_local_paths_only() {
+        let repo = TestRepo::with_initial_commit();
+        let ls_remote = |url: &str| {
+            repo.git_command()
+                .args(["ls-remote", "--symref", url, "HEAD"])
+                .run()
+                .unwrap()
+        };
+
+        let local = ls_remote(&path_slash::PathExt::to_slash_lossy(repo.root_path()));
+        let local_stderr = String::from_utf8_lossy(&local.stderr);
+        assert!(
+            local.status.success(),
+            "local-path remote must still resolve: {local_stderr}"
+        );
+
+        let remote = ls_remote("https://github.com/test-owner/test-repo.git");
+        let stderr = String::from_utf8_lossy(&remote.stderr);
+        assert!(
+            stderr.contains("transport 'https' not allowed"),
+            "https transport must be refused, got: {stderr}"
+        );
+
+        // The opt-out has to clear the var, not narrow it: a value that still
+        // named a protocol list would silently keep the fixture clone offline,
+        // and the daily benchmark run is the only thing that would notice.
+        let mut opted_out = Command::new("git");
+        configure_git_cmd(&mut opted_out, Path::new(NULL_DEVICE));
+        allow_network_transports(&mut opted_out);
+        assert!(
+            opted_out
+                .get_envs()
+                .any(|(k, v)| k == "GIT_ALLOW_PROTOCOL" && v.is_none())
+        );
+    }
 
     #[test]
     fn test_unix_to_iso8601() {
