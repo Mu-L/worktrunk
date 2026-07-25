@@ -5,6 +5,7 @@
 
 use serde::Deserialize;
 use std::process::Output;
+use worktrunk::git::remote_ref::gitea::api_error_message;
 use worktrunk::git::{Repository, parse_owner_repo};
 
 use super::{
@@ -33,18 +34,22 @@ fn tea_api(repo: &Repository, path: &str) -> Option<Output> {
 /// — it copies the response body to stdout and exits 0 — so a non-zero exit
 /// means `tea` itself failed (transport error, no login configured) and its
 /// stderr names which, while every HTTP error arrives as a successful spawn
-/// carrying Gitea's `APIError` body in place of the resource. Branching on the
-/// exit code alone would let that body through as data: every field of
-/// [`GiteaCombinedStatus`] defaults, so a 500 would deserialize as "no
-/// statuses" and paint a blank CI cell.
+/// carrying Gitea's `APIError` body in place of the resource, which
+/// [`api_error_message`] classifies by shape. Branching on the exit code alone
+/// would let that body through as data: every field of [`GiteaCombinedStatus`]
+/// defaults, so a 500 would deserialize as "no statuses" and paint a blank CI
+/// cell.
+///
+/// A 500 whose message Gitea blanked comes back as an empty string — an error
+/// with nothing to sniff, which [`is_retriable_error`] reads as non-retriable,
+/// so the cell stays blank. That is the same cell the body would have produced
+/// as data, but reaching it as an error keeps the PR-list path from warning
+/// about a Gitea API change when the API in fact answered with an error.
 fn tea_api_error(output: &Output) -> Option<String> {
     if !output.status.success() {
         return Some(output_error_text(output));
     }
-    serde_json::from_slice::<GiteaApiError>(&output.stdout)
-        .ok()
-        .map(|error| error.message)
-        .filter(|message| !message.trim().is_empty())
+    api_error_message(&output.stdout)
 }
 
 /// Fetch the combined CI status for a commit SHA.
@@ -193,15 +198,6 @@ fn parse_gitea_status_state(state: &str) -> Option<CiStatus> {
     }
 }
 
-/// Gitea's `APIError` body, which the API returns in place of the resource
-/// whenever a request fails. `message` carries no `#[serde(default)]` so the
-/// shape only matches a real error body — the success shapes here (a PR array,
-/// a combined status) have no `message` field.
-#[derive(Debug, Deserialize)]
-struct GiteaApiError {
-    message: String,
-}
-
 /// Combined commit status from `GET /repos/{owner}/{repo}/commits/{ref}/status`.
 #[derive(Debug, Deserialize)]
 struct GiteaCombinedStatus {
@@ -290,8 +286,9 @@ mod tests {
     /// `tea_api_error` reads the response shape, since the exit code carries
     /// nothing: a PR array and a combined status are data, an `APIError` body
     /// is the failure. Gitea blanks the message of a 500 for a non-admin token,
-    /// which leaves nothing to sniff — that falls through to the data path,
-    /// where the parse decides.
+    /// which leaves nothing to sniff but is still the error shape — it comes
+    /// back as an empty message rather than falling through to the data path,
+    /// where the PR-list parse would blame a Gitea API change.
     #[test]
     fn test_tea_api_error_reads_the_response_shape() {
         // `ExitStatus::default()` is success on every platform, so these all
@@ -311,7 +308,17 @@ mod tests {
             tea_api_error(&response(r#"{"message":"token does not have scope"}"#)),
             Some("token does not have scope".to_string())
         );
-        assert_eq!(tea_api_error(&response(r#"{"message":"  "}"#)), None);
+        // A production 500 for a non-admin token: the envelope, no text.
+        assert_eq!(
+            tea_api_error(&response(
+                r#"{"message":"","url":"https://gitea.example.com/api/swagger"}"#
+            )),
+            Some(String::new())
+        );
+        assert_eq!(
+            tea_api_error(&response(r#"{"message":"  "}"#)),
+            Some(String::new())
+        );
     }
 
     #[test]
