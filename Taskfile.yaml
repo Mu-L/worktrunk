@@ -13,6 +13,24 @@ tasks:
     desc: Run tests with coverage report
     cmd: cargo llvm-cov --html --features shell-integration-tests {{.CLI_ARGS}}
 
+  profile-tests:
+    desc: Run the suite under CPU accounting and report where the time goes
+    # The `perf` nextest profile lowers slow-timeout to 1s so every test above
+    # that prints with its duration. tests/CLAUDE.md → Profiling the Suite
+    # covers how to read the numbers.
+    vars:
+      RUN_TMP:
+        sh: mktemp -d
+    cmds:
+      # Build first so the measurement covers the test run alone.
+      - cargo nextest run --no-run --features shell-integration-tests
+      - defer: rm -rf {{.RUN_TMP}}
+      # TMPDIR points at a fresh directory: it keeps the run's temp churn off
+      # the shared temp root, and whatever survives is a leak the suite owns.
+      - TMPDIR={{.RUN_TMP}} /usr/bin/time cargo nextest run --profile perf --features shell-integration-tests {{.CLI_ARGS}}
+      - echo "temp entries surviving the run (each one is a leak):"; find {{.RUN_TMP}} -maxdepth 1 -mindepth 1 | sed 's|.*/|  |'
+      - echo "per-test timings in target/nextest/perf/junit.xml"
+
   setup-web:
     desc: Setup Claude Code web environment for development
     platforms: [linux]

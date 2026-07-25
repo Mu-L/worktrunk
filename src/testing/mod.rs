@@ -437,19 +437,30 @@ pub fn scrub_git_path_vars(cmd: &mut Command) {
     }
 }
 
-/// A process-scoped empty directory used as the default `current_dir` for
-/// [`wt_command`]. Created lazily on first use and kept alive for the rest of
-/// the test process; the OS reaps it from the temp dir afterwards (statics
-/// aren't dropped at process exit, so `TempDir::drop` doesn't run).
+/// A single fixed empty directory used as the default `current_dir` for
+/// [`wt_command`], created on first use and shared by every test process.
 ///
-/// The dir is guaranteed to be outside any git repository and to have no
-/// `.config/wt.toml`, so `wt` invocations spawned through [`wt_command`] don't
-/// pick up the test process's inherited CWD (which is typically the worktrunk
-/// repo root, with its own `.config/wt.toml` and git history).
+/// The dir is outside any git repository and has no `.config/wt.toml`, so `wt`
+/// invocations spawned through [`wt_command`] don't pick up the test process's
+/// inherited CWD (which is typically the worktrunk repo root, with its own
+/// `.config/wt.toml` and git history). Nothing writes into it — a test that
+/// needs to write uses a `TestRepo`.
+///
+/// Deliberately *not* a `TempDir`. Statics aren't dropped at process exit, so a
+/// `TempDir` here is never cleaned up, and nextest runs one process per test:
+/// that leaked one empty directory per test — ~700 per integration-suite run —
+/// into a temp root nothing reliably sweeps (macOS clears it only at boot).
+/// Hundreds of thousands of stale entries cost nothing to ignore but are
+/// expensive to enumerate, and `git::recover::recover_from_path` reads every
+/// ancestor directory of a deleted CWD: its own unit test went from 0.3s to
+/// 14-34s on a developer machine. One fixed directory never grows.
 fn isolated_test_cwd() -> &'static Path {
-    static ISOLATED_CWD: std::sync::LazyLock<TempDir> =
-        std::sync::LazyLock::new(|| TempDir::new().expect("create isolated test cwd"));
-    ISOLATED_CWD.path()
+    static ISOLATED_CWD: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+        let dir = std::env::temp_dir().join("worktrunk-test-cwd");
+        std::fs::create_dir_all(&dir).expect("create isolated test cwd");
+        dir
+    });
+    ISOLATED_CWD.as_path()
 }
 
 /// Create a `wt` CLI command with standardized test environment settings.
@@ -458,8 +469,8 @@ fn isolated_test_cwd() -> &'static Path {
 /// - All host `GIT_*` and `WORKTRUNK_*` variables are cleared
 /// - Color output is forced (`CLICOLOR_FORCE=1`) so ANSI styling appears in snapshots
 /// - Terminal width set to 150 columns (`COLUMNS=150`)
-/// - `current_dir` defaults to a process-scoped empty tempdir (not a git repo,
-///   no project config), so `wt` doesn't pick up worktrunk's own
+/// - `current_dir` defaults to one fixed empty directory shared by every test
+///   process (not a git repo, no project config), so `wt` doesn't pick up worktrunk's own
 ///   `.config/wt.toml` or detect a git repo from the test process's inherited
 ///   CWD. Tests that need a specific CWD must override via
 ///   `cmd.current_dir(...)`; `repo.wt_command()` does so automatically.

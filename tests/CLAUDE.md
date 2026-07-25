@@ -18,6 +18,18 @@ A target-filtered run (`--lib`, `--test integration`, …) on a fresh `target/` 
 
 **The gate runs one platform, so `#[cfg(unix)]` hides dead code from it.** A helper, const, or import whose every use sits behind `#[cfg(unix)]` is live locally and dead on Windows, where `-D warnings` fails `test (windows)` with "never used". Gate the item with the same predicate as its uses. Cross-compiling to check locally doesn't work: the C build scripts (tree-sitter, libmimalloc-sys) fail before the Rust lint runs.
 
+## Profiling the Suite
+
+```bash
+task profile-tests   # CPU accounting, per-test timings, temp-leak check
+```
+
+The integration binary dominates: ~2,200 tests averaging ~0.6s, each spawning `wt` and `git` against a fresh fixture copy. Two thirds of the suite's CPU is kernel time, so the cost is process creation and filesystem churn rather than computation, and it sits in a broad middle rather than in a few outliers. Track `user`/`sys` from the `time` line; wall time is unreliable whenever a sibling worktree is building or testing, which on this project is most of the time. Per-test durations land in `target/nextest/perf/junit.xml`.
+
+The task points `TMPDIR` at a fresh directory and lists what survives the run. Only fixed-name directories may survive (`worktrunk-test-cwd`, `wt-test-profraw`); anything else is a leak. Process-scoped scratch space belongs in a fixed directory, not a `TempDir` in a `static`: statics don't run destructors at process exit, so under nextest's process-per-test model that leaks one directory per test into a temp root nothing reliably sweeps (macOS clears it only at boot). Hundreds of thousands of stale entries cost nothing to ignore but are expensive to enumerate, and `git::recover::recover_from_path` reads every ancestor directory of a deleted CWD.
+
+Tests that drive `git` directly go through `configure_git_env(Cmd::new("git"), &git_config_path)`. Without it the host's config applies, and a conditional `includeIf "gitdir:<home>"` enabling `commit.gpgsign` fails any commit the test makes — but only when `TMPDIR` sits inside the matched tree, so the suite passes or fails on where the temp dir happens to live.
+
 ## Coverage Investigation
 
 `task coverage` runs the suite and writes an HTML report to `target/llvm-cov/html/index.html`. Both CI (`code-coverage` job) and local `task coverage` pass `--features shell-integration-tests`, so code behind that flag is compiled and measured.
