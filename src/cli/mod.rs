@@ -342,7 +342,7 @@ impl HookFlags {
 
 #[derive(Args)]
 pub(crate) struct SwitchArgs {
-    /// Branch name, shortcut, or PR/MR URL
+    /// Branch, worktree path, shortcut, or PR/MR URL
     ///
     /// Opens interactive picker if omitted.
     /// Shortcuts: `^` (default branch), `-` (previous), `@` (current), `pr:{N}` (GitHub PR), `mr:{N}` (GitLab MR)
@@ -641,6 +641,10 @@ $ wt switch --create feature               # New branch and worktree
 $ wt switch --create fix --base release    # New branch from release
 $ wt switch --create temp --no-hooks       # Skip hooks
 ```
+
+## Naming a worktree
+
+Worktrees are addressed by branch name, and every argument that takes one also accepts the path of the worktree itself — resolved after the branch, so a directory never shadows a branch sharing its name. A path names what a branch cannot: a detached worktree, or one of two checkouts of the same branch. Relative paths resolve against `-C` and a leading `~` against the home directory, so a path worktrunk printed can be pasted back.
 
 ## Shortcuts
 
