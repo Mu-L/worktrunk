@@ -19,8 +19,15 @@ tasks:
     # that prints with its duration. tests/CLAUDE.md → Profiling the Suite
     # covers how to read the numbers.
     vars:
+      # Rooted at /tmp rather than `mktemp -d`, which honors $TMPDIR. A fixture
+      # binds a unix socket 33 bytes into its temp root, and sun_path holds 104
+      # bytes on macOS including the NUL. Roots are canonicalized, and the
+      # default per-user $TMPDIR canonicalizes to 56 bytes — so `mktemp -d`
+      # beneath it lands that socket at exactly 104 bytes of string, one over,
+      # failing test_copy_ignored_skips_non_regular_files on every profiling
+      # run. /private/tmp is 30, which leaves 41 spare.
       RUN_TMP:
-        sh: mktemp -d
+        sh: mktemp -d /tmp/wt-profile.XXXXXX
     cmds:
       # Build first so the measurement covers the test run alone.
       - cargo nextest run --no-run --features shell-integration-tests
