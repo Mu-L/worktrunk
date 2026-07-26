@@ -23,12 +23,25 @@
 //!
 //! ## Environment Isolation
 //!
-//! Git commands are run with isolated environments using `Cmd::env()` to ensure:
-//! - No interference from global git config
-//! - Deterministic commit timestamps
-//! - Consistent locale settings
-//! - No cross-test contamination
-//! - Thread-safe execution (no global state mutation)
+//! No `git` the suite runs reads the developer's `~/.gitconfig`. The guarantee
+//! rests on one file, `dev/hermetic-gitconfig`, which
+//! `.cargo/config.toml` installs as `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
+//! for every process cargo starts. That is the only layer that can cover git
+//! spawned *in-process*: `Repository::run_command` builds a plain
+//! `Cmd::new("git")`, so a test driving production code has no per-command hook
+//! to reach, and a variable can only be set before the process starts
+//! (`std::env::set_var` is `unsafe`, and the crate forbids `unsafe`).
+//!
+//! The rest is downstream of it:
+//!
+//! - [`configure_git_env`] / [`configure_git_cmd`] override `GIT_CONFIG_GLOBAL`
+//!   with a per-`TestRepo` copy of that file plus a test identity, so a test can
+//!   edit its own git config without touching any other test's.
+//! - [`isolate_subprocess_env`] scrubs the host's `GIT_*` from `wt` children but
+//!   passes these two through, so a subprocess inherits the same floor.
+//!
+//! On top of that isolation the helpers pin commit timestamps, locale, and
+//! terminal width, all per command — no test mutates process-global state.
 
 pub mod mock_commands;
 
@@ -207,15 +220,31 @@ fn copy_standard_fixture(dest: &Path) -> FixtureWorktrees {
     FixtureWorktrees { worktrees, remote }
 }
 
-/// Write a gitconfig file for tests.
+/// The suite's hermetic git config, embedded from the file `.cargo/config.toml`
+/// installs as `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`. Embedding rather
+/// than re-stating it is what keeps the per-`TestRepo` copy that
+/// [`write_test_gitconfig`] writes from drifting from the process-wide floor.
+const HERMETIC_GITCONFIG: &str = include_str!("../../dev/hermetic-gitconfig");
+
+/// The identity [`write_test_gitconfig`] appends to [`HERMETIC_GITCONFIG`].
+///
+/// It is absent from the shared file on purpose — see the comment there.
+const TEST_IDENTITY_GITCONFIG: &str = r#"
+[user]
+	name = Test User
+	email = test@example.com
+"#;
+
+/// Write the per-`TestRepo` git config: the hermetic config every git in the
+/// suite already resolves, plus a test identity.
+///
+/// [`configure_git_env`] points `GIT_CONFIG_GLOBAL` at this copy rather than at
+/// the shared file so a test can append to its own git config — the shared file
+/// is checked in, and one test editing it would reach every other test.
 fn write_test_gitconfig(path: &Path) {
     std::fs::write(
         path,
-        "[user]\n\tname = Test User\n\temail = test@example.com\n\
-         [advice]\n\tmergeConflict = false\n\tresolveConflict = false\n\
-         [init]\n\tdefaultBranch = main\n\
-         [commit]\n\tgpgsign = false\n\
-         [rerere]\n\tenabled = true\n",
+        format!("{HERMETIC_GITCONFIG}{TEST_IDENTITY_GITCONFIG}"),
     )
     .unwrap();
 }
@@ -349,9 +378,20 @@ fn default_llvm_profile_file_with(inherited: Option<std::ffi::OsString>) -> std:
     dir.join("cov-%m_%p.profraw").into_os_string()
 }
 
+/// The two `GIT_*` variables [`isolate_subprocess_env`] passes through instead
+/// of scrubbing.
+///
+/// They name the suite's hermetic git config (`.cargo/config.toml` sets both
+/// for every process cargo starts), so scrubbing them would hand the child back
+/// the developer's `~/.gitconfig` — the opposite of what the scrub is for.
+/// Callers that own a `TestRepo` overwrite `GIT_CONFIG_GLOBAL` with their own
+/// copy afterwards via [`configure_git_cmd`]; the rest inherit the floor.
+const HERMETIC_GIT_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"];
+
 /// Prepare a subprocess to run with a clean wt environment.
 ///
-/// Strips every `GIT_*` and `WORKTRUNK_*` from the parent env, plus
+/// Strips every `GIT_*` and `WORKTRUNK_*` from the parent env — bar
+/// `HERMETIC_GIT_CONFIG_VARS` — plus
 /// `NO_COLOR` / `FORCE_HYPERLINK` / `SHELL` / `PSModulePath`, then points the three
 /// `WORKTRUNK_*_PATH` env vars at known locations:
 ///
@@ -387,7 +427,9 @@ where
     I: IntoIterator<Item = String>,
 {
     for key in env_keys {
-        if key.starts_with("GIT_") || key.starts_with("WORKTRUNK_") {
+        if (key.starts_with("GIT_") || key.starts_with("WORKTRUNK_"))
+            && !HERMETIC_GIT_CONFIG_VARS.contains(&key.as_str())
+        {
             cmd.env_remove(&key);
         }
     }
@@ -446,12 +488,10 @@ pub fn scrub_git_path_vars(cmd: &mut Command) {
 /// rooted directly in the shared dir pays for everything the machine has put
 /// there; rooted here it pays for the handful of fixtures currently alive.
 ///
-/// Staying under the system temp dir is deliberate. Somewhere below `$HOME`
-/// would give an even smaller ancestor chain, but it puts the fixtures inside
-/// the reach of a conditional `includeIf "gitdir:<home>"` in the developer's
-/// git config — and tests that drive git through `Repository::run_command`
-/// (rather than [`configure_git_env`]) inherit it, so `commit.gpgsign` there
-/// fails their commits.
+/// Where that root sits carries no isolation weight: the fixtures resolve git
+/// config from `dev/hermetic-gitconfig` wherever they live, so a conditional
+/// `includeIf "gitdir:<home>"` in the developer's config can't reach them.
+/// Only the ancestor-walk cost above argues for one location over another.
 ///
 /// The name is two characters because a unix socket path can't exceed
 /// `sun_path` (104 bytes on macOS, including the NUL). macOS's per-user
@@ -3180,6 +3220,8 @@ mod tests {
         let synthetic_env = [
             "GIT_DIR".to_string(),
             "GIT_AUTHOR_DATE".to_string(),
+            "GIT_CONFIG_GLOBAL".to_string(),
+            "GIT_CONFIG_SYSTEM".to_string(),
             "WORKTRUNK_CONFIG_PATH".to_string(),
             "WORKTRUNK_HISTORY".to_string(),
             "PATH".to_string(),
@@ -3210,6 +3252,11 @@ mod tests {
         // Not scrubbed: vars that don't match either prefix.
         assert!(!removed.contains_key("PATH"));
         assert!(!removed.contains_key("HOME"));
+        // Nor the two that name the hermetic git config — the child inherits
+        // the suite's floor instead of falling back to `~/.gitconfig`.
+        for var in HERMETIC_GIT_CONFIG_VARS {
+            assert!(!removed.contains_key(*var), "{var} should pass through");
+        }
         // No underscore — prefix check requires `GIT_`/`WORKTRUNK_`.
         assert!(!removed.contains_key("GIT"));
         assert!(!removed.contains_key("WORKTRUNK"));
@@ -3243,6 +3290,52 @@ mod tests {
             matches!(rust_log, Some(None)),
             "RUST_LOG should be explicitly removed from CLI test children"
         );
+    }
+
+    /// The isolation the whole suite rests on, asserted where it is weakest.
+    ///
+    /// `Repository::run_command` builds a plain `Cmd::new("git")` with no
+    /// `GIT_CONFIG_*` of its own, so what it resolves is whatever the test
+    /// process inherited — which `.cargo/config.toml` pins to
+    /// `dev/hermetic-gitconfig`. Listing that config through the production
+    /// API fails loudly if the layer goes missing, instead of leaving the suite
+    /// to read the developer's `~/.gitconfig` and pass or fail on its contents.
+    #[test]
+    fn in_process_git_reads_only_the_hermetic_config() {
+        let repo = TestRepo::with_initial_commit();
+
+        let global = repo
+            .repo
+            .run_command(&["config", "--global", "--list"])
+            .unwrap();
+        let system = repo
+            .repo
+            .run_command(&["config", "--system", "--list"])
+            .unwrap();
+        // Both slots name the same file, so there is no way to deny one and
+        // leave the other reading `/etc/gitconfig`.
+        assert_eq!(system, global);
+        insta::assert_snapshot!(global, @r"
+        user.useconfigonly=true
+        advice.mergeconflict=false
+        advice.resolveconflict=false
+        init.defaultbranch=main
+        commit.gpgsign=false
+        rerere.enabled=true
+        ");
+
+        // Identity comes from the fixture's own local config, so a commit made
+        // through the production API is authored the same way on every machine
+        // — and `useConfigOnly` in the hermetic config means a fixture that
+        // forgot one errors rather than borrowing the host's username.
+        std::fs::write(repo.path().join("second.txt"), "second").unwrap();
+        repo.repo.run_command(&["add", "second.txt"]).unwrap();
+        repo.repo.run_command(&["commit", "-m", "second"]).unwrap();
+        let author = repo
+            .repo
+            .run_command(&["log", "-1", "--format=%an <%ae>"])
+            .unwrap();
+        insta::assert_snapshot!(author.trim(), @"Test User <test@example.com>");
     }
 
     #[test]

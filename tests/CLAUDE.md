@@ -30,8 +30,6 @@ The fixtures put their temp directories under `test_temp_root()` (`$TMPDIR/wt`) 
 
 `task profile-tests` points `TMPDIR` at a fresh directory and lists what survives the run. Only `wt/isolated-cwd` and `wt-test-profraw` may survive; anything else is a leak. Process-scoped scratch space belongs in a fixed directory, not a `TempDir` in a `static`: statics don't run destructors at process exit, so under nextest's process-per-test model that leaks one directory per test into a temp root nothing reliably sweeps (macOS clears it only at boot).
 
-Tests that drive `git` directly go through `configure_git_env(Cmd::new("git"), &git_config_path)`. Without it the host's config applies, and a conditional `includeIf "gitdir:<home>"` enabling `commit.gpgsign` fails any commit the test makes — but only when `TMPDIR` sits inside the matched tree, so the suite passes or fails on where the temp dir happens to live.
-
 ## Coverage Investigation
 
 `task coverage` runs the suite and writes an HTML report to `target/llvm-cov/html/index.html`. Both CI (`code-coverage` job) and local `task coverage` pass `--features shell-integration-tests`, so code behind that flag is compiled and measured.
@@ -60,7 +58,7 @@ be isolated from the host environment to prevent:
 
 - **Directive leakage**: Test commands writing to the user's shell directive file
 - **Config pollution**: Tests reading/writing the user's real config
-- **Git interference**: Host GIT_* environment variables affecting test behavior
+- **Git interference**: Host GIT_* environment variables affecting test behavior (the developer's *config* is denied a layer lower — see Git Config Isolation below)
 
 ### With a TestRepo fixture (most tests)
 
@@ -113,6 +111,28 @@ call `.current_dir(...)` explicitly.
 | `repo.wt_command()` | `Command` | Running wt commands with a TestRepo |
 | `wt_command()` | `Command` | Running wt without a TestRepo (free function) |
 | `repo.git_command()` | `Cmd` | Running git commands (use `.run()` not `.output()`) |
+
+## Git Config Isolation
+
+**No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. One file carries the whole guarantee: `dev/hermetic-gitconfig`, which `.cargo/config.toml` installs as `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` for every process cargo starts.
+
+That layer is the one that can cover git spawned **in-process**. `TestRepo` exposes a `repo` field of the production `Repository` type, and `Repository::run_command` builds a plain `Cmd::new("git")` — no per-command hook the fixtures could reach, whether the call is test setup or the production code under test. Git reads the two variables and nothing else to find its out-of-repo config, and a variable can only be set before the process starts (`std::env::set_var` is `unsafe`, and the crate forbids `unsafe`), so the runner is the only place it can come from.
+
+Everything else is downstream of that floor, not a second guarantee:
+
+- `configure_git_env` / `configure_git_cmd` — used by `TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()` — override `GIT_CONFIG_GLOBAL` with a per-`TestRepo` copy of the same file plus a test identity, so a test can append to its own git config without reaching any other test's.
+- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes these two through, so a subprocess inherits the same floor.
+
+Two things follow that are easy to get wrong:
+
+- **Identity lives in the fixture repo's local config**, not the hermetic file. `user.useConfigOnly` there turns a fixture that forgot one into an error, rather than a commit authored from the host's username and hostname. Every `TestRepo` constructor already sets it.
+- **Where fixtures live carries no isolation weight.** A conditional `includeIf "gitdir:<home>"` can't reach them wherever they sit, so `test_temp_root()`'s location is a question of ancestor-walk cost alone.
+
+What the hole cost before this: any key in the developer's config applied to fixture repos, so `commit.gpgsign` failed their commits, `core.hooksPath` ran their hooks, and `core.fsmonitor` / `credential.helper` / `filter.*` ran programs of their choosing. A conditional `includeIf` made which of those happened depend on where `$TMPDIR` sat — the suite passed by accident of the temp dir being outside `$HOME`.
+
+The cost of the mechanism is that `cargo run -- <cmd>` in this repo also runs against the hermetic config — no aliases, no credential helper, no identity. Use the installed `wt` for anything that commits.
+
+`GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` are **not** part of this floor: `configure_git_env` pins them per command, so a commit made through `Repository::run_command` still gets the wall clock. Snapshot the author, not the date.
 
 ## Config Isolation for In-Process Unit Tests
 

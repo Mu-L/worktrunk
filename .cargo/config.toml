@@ -3,3 +3,31 @@
 # Integration tests override with COLUMNS=150 in their command setup.
 [env]
 COLUMNS = "80"
+
+# Deny the developer's git config to every `git` the test suite spawns.
+#
+# An in-process test drives git through the test process's own environment —
+# `Repository::run_command` builds a plain `Cmd::new("git")`, so there is no
+# per-command hook the fixtures can reach. Git resolves the global and system
+# config from these two variables alone, and a variable can only be set before
+# the process starts, so this is the one layer that covers in-process git.
+# Everything else is downstream of it: `configure_git_env` overrides
+# `GIT_CONFIG_GLOBAL` with a per-`TestRepo` copy, and `isolate_subprocess_env`
+# lets both pass through to `wt` children rather than scrubbing them.
+#
+# Without it the suite reads whatever the developer configured — `commit.gpgsign`
+# fails every fixture commit, `core.hooksPath` runs their hooks, `core.fsmonitor`
+# and `credential.helper` run programs of their choosing — and a conditional
+# `includeIf "gitdir:…"` makes which of those happens depend on where `$TMPDIR`
+# sits. Both slots point at one file because the file is the whole allowance:
+# the only git config outside a repository the suite may read.
+#
+# `force` so an exported `GIT_CONFIG_GLOBAL` can't reinstate the host's config;
+# `relative` resolves against this file's worktree, so each worktree uses its own.
+#
+# The cost is that `cargo run -- <cmd>` also runs against this config rather
+# than the developer's: no aliases, no credential helper, and no identity, so a
+# `cargo run -- merge` that would commit fails instead of writing an author the
+# developer didn't pick. Use the installed `wt` for anything that commits.
+GIT_CONFIG_GLOBAL = { value = "dev/hermetic-gitconfig", relative = true, force = true }
+GIT_CONFIG_SYSTEM = { value = "dev/hermetic-gitconfig", relative = true, force = true }

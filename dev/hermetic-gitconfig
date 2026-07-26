@@ -1,0 +1,35 @@
+# The only git config outside a repository that worktrunk's test suite reads.
+#
+# `.cargo/config.toml` points both `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
+# at this file for every process cargo starts, so a `git` spawned in-process by
+# a test — including one production code runs through `Repository::run_command`
+# — resolves config from this file plus the fixture repo's own `.git/config`,
+# never from the developer's `~/.gitconfig`. `write_test_gitconfig` embeds this
+# file and appends an identity for the per-`TestRepo` copy that
+# `configure_git_env` installs.
+#
+# Embedding is what puts it in `dev/` rather than beside the other fixtures: it
+# makes the file a compile-time input to the library, and `dev/` is the
+# directory the crates.io archive and the `flake.nix` source filter already
+# carry for that reason. `embedded_assets_ship_in_package` pins the rule.
+#
+# There is deliberately no `[user] name`/`email` here. Identity belongs to the
+# fixture repo's local config, and `useConfigOnly` turns a fixture that forgot
+# one into an error rather than a commit authored from the host's username and
+# hostname — which would be neither hermetic nor reproducible.
+
+[user]
+	useConfigOnly = true
+
+[advice]
+	mergeConflict = false
+	resolveConflict = false
+
+[init]
+	defaultBranch = main
+
+[commit]
+	gpgsign = false
+
+[rerere]
+	enabled = true
