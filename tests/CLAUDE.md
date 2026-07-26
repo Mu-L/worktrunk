@@ -59,6 +59,7 @@ be isolated from the host environment to prevent:
 - **Directive leakage**: Test commands writing to the user's shell directive file
 - **Config pollution**: Tests reading/writing the user's real config
 - **Git interference**: Host GIT_* environment variables affecting test behavior (the developer's *config* is denied a layer lower — see Git Config Isolation below)
+- **Network access**: a fixture's `https://` remote URL becoming a real connect, with no timeout bounding it (`GIT_ALLOWED_PROTOCOLS` in `src/testing/mod.rs`)
 
 ### With a TestRepo fixture (most tests)
 
@@ -112,6 +113,17 @@ call `.current_dir(...)` explicitly.
 | `wt_command()` | `Command` | Running wt without a TestRepo (free function) |
 | `repo.git_command()` | `Cmd` | Running git commands (use `.run()` not `.output()`) |
 
+### Where a new environment variable goes
+
+A test child's environment is three layers, each with one home in
+`src/testing/mod.rs`: `STATIC_TEST_ENV_VARS` for a determinism knob every child
+needs, `PTY_TEST_ENV_VARS` for one only a terminal triggers, and `pty_env_vars`
+for a path that varies per fixture. `configure_cli_command` and
+`configure_pty_command` apply them by transport, so a variable added to the
+right layer reaches every test that spawns `wt`. A per-builder copy reaches only
+the tests that happen to use that builder, and the ones it misses fail later,
+somewhere else.
+
 ## Git Config Isolation
 
 **No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. One file carries the whole guarantee: `dev/hermetic-gitconfig`, which `.cargo/config.toml` installs as `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` for every process cargo starts.
@@ -121,7 +133,7 @@ That layer is the one that can cover git spawned **in-process**. `TestRepo` expo
 Everything else is downstream of that floor, not a second guarantee:
 
 - `configure_git_env` / `configure_git_cmd` — used by `TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()` — override `GIT_CONFIG_GLOBAL` with a per-`TestRepo` copy of the same file plus a test identity, so a test can append to its own git config without reaching any other test's.
-- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes these two through, so a subprocess inherits the same floor.
+- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes these two through, so a subprocess inherits the same floor. `pty_env_vars` points a PTY child at the same per-`TestRepo` copy.
 
 Two things follow that are easy to get wrong:
 
@@ -283,6 +295,12 @@ Two traps:
 - **Give each half its own wait.** Sleeping once and then asserting both "X happened" and "Y didn't" makes the presence half flaky. Poll for X, then hold the window for Y.
 - **Structural absence needs no window at all.** When the event is gated on a condition the test never sets up, it can't fire regardless of timing. Drop the sleep: poll the positive precondition and the absence holds by construction. A watchdog whose escalation is gated on `command.is_some()` can't escalate with no command, so the test polls for the first render and asserts `!escalated` with no window.
 
+### Time-thresholded output: suppress it at the source
+
+Output that appears only once an operation runs past a threshold is a function of machine load, not of behavior: the `Progress` and `Watchdog` spinners (`src/progress.rs`), `Cmd::delayed_stream`'s progress line, the picker's placeholder reveal. A PTY test captures the raw byte stream, so it keeps every in-place redraw frame a terminal would have erased, elapsed-second counter and all — frames that show up when the whole suite runs together and not when the test runs alone.
+
+Each threshold has an env override pinning it, so the output is present or absent by construction rather than by timing. A new one goes in the baseline that matches its scope — `PTY_TEST_ENV_VARS` when only a terminal triggers it (`WORKTRUNK_TEST_SPINNERS=0`), `STATIC_TEST_ENV_VARS` when a pipe does too (`WORKTRUNK_TEST_DELAYED_STREAM_MS=-1`) — and reaches every PTY child from there, rather than being added per builder. Filtering the frames out of the capture afterwards is the weaker fix: the filter has to model cursor movement, and a block that redraws with a cursor-up spans lines a line-scoped filter can't follow.
+
 ## No Retries
 
 Tests run once. Worktrunk configures no nextest `retries` and writes no retry loops: a test that passes only on a second attempt is a bug report, and retrying it discards the report while leaving the bug. A green suite has to mean the code is green, not that the run's flakes stayed under a retry budget. Fix the flake at its root:
@@ -428,17 +446,13 @@ The PTY approach is specifically for **user-facing output documentation**. It's 
 
 ## Coverage in PTY Tests
 
-PTY tests use `cmd.env_clear()` for isolation. To enable coverage, pass through LLVM env vars:
+`configure_pty_command` clears the child's environment, so an instrumented
+binary would lose the LLVM vars that tell it where to write coverage data. It
+passes them back through, which is one more reason every PTY test starts there:
 
 ```rust
-// Standard setup (most PTY tests)
 crate::common::configure_pty_command(&mut cmd);
-
-// Custom env setup (shell tests needing USER, SHELL, ZDOTDIR)
-cmd.env_clear();
-cmd.env("HOME", ...);
-// ... custom env ...
-crate::common::pass_coverage_env_to_pty_cmd(&mut cmd);
+// ... test-specific env (USER, SHELL, ZDOTDIR, the fixture's paths) ...
 ```
 
 ## No Global State Mutations in Tests

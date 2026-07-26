@@ -272,16 +272,51 @@ pub const TEST_EPOCH: u64 = 1735776000;
 /// Generous to avoid flakiness under CI load; exponential backoff means fast tests when things work.
 const BG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Static environment variables shared by all test isolation helpers.
+/// Value for `GIT_ALLOW_PROTOCOL` on every git process a test spawns, whether
+/// directly or as a child of `wt`: local paths and `file://` only, so the
+/// suite cannot reach the wire.
 ///
-/// These are used by both `configure_cli_command()` (for Command-based tests)
-/// and `TestRepo::test_env_vars()` (for PTY tests). Adding a variable here
-/// ensures consistency across both test infrastructure paths.
+/// Tests point remotes at real hosts (`https://github.com/test-owner/…`) to
+/// drive forge detection, and `Repository::default_branch()` is allowed to
+/// fall through to `git ls-remote` when neither the worktrunk cache nor
+/// `origin/HEAD` resolves. So a test that never meant to do network work
+/// makes an unbounded connect to whatever host the URL names. Nothing in that
+/// path has a timeout: an unanswered SYN costs ~127 s per address on Linux
+/// (`tcp_syn_retries=6`) and a host with several A/AAAA records is tried in
+/// turn, which is how a 2-second test reaches nextest's 180 s limit.
 ///
-/// NOTE: Path-dependent variables (HOME, WORKTRUNK_CONFIG_PATH, GIT_CONFIG_*)
-/// are NOT included here because they depend on the TestRepo instance.
+/// Denying the transport turns that into an immediate `transport 'https' not
+/// allowed`; detection then falls back to local inference, leaving output
+/// unchanged. The adjacent `GIT_TERMINAL_PROMPT=0` doesn't subsume this: it
+/// only suppresses the credential prompt the host's 401 triggers, so the
+/// request has already gone out by the time it applies.
+const GIT_ALLOWED_PROTOCOLS: &str = "file";
+
+/// Restore git's default protocol set on a command built by
+/// [`configure_git_cmd`], for a caller whose job is to fetch a fixture from
+/// upstream — the real-repo benchmark clone. Grep for this to enumerate
+/// everything that may reach the wire; tests are not among them.
+pub fn allow_network_transports(cmd: &mut Command) {
+    cmd.env_remove("GIT_ALLOW_PROTOCOL");
+}
+
+/// Determinism knobs every isolated wt subprocess needs, whatever it's
+/// attached to.
+///
+/// A test child's environment is three layers, each with one home: this
+/// baseline, the fixture's paths ([`pty_env_vars`]), and whatever the child's
+/// transport needs — [`configure_cli_command`] for a piped child,
+/// [`PTY_TEST_ENV_VARS`] for one on a terminal. A knob both transports need
+/// belongs here, so adding it once reaches every path.
+///
+/// `TERM` is transport-level rather than baseline, which is why it's absent
+/// here: a piped child gets `TERM=alacritty` so hyperlink detection has
+/// something to key on, while a PTY child needs a `TERM` with real terminfo —
+/// macOS CI carries no alacritty entry, and skim fails without one.
 pub const STATIC_TEST_ENV_VARS: &[(&str, &str)] = &[
     ("CLICOLOR_FORCE", "1"),
+    // Deny network git transports (see GIT_ALLOWED_PROTOCOLS)
+    ("GIT_ALLOW_PROTOCOL", GIT_ALLOWED_PROTOCOLS),
     // Terminal width for PTY tests. configure_cli_command() overrides to 500 for longer paths.
     ("COLUMNS", "150"),
     // Deterministic locale settings
@@ -315,10 +350,83 @@ pub const STATIC_TEST_ENV_VARS: &[(&str, &str)] = &[
     ("WORKTRUNK_TEST_POWERSHELL_ENV", "0"),
 ];
 
-// NOTE: TERM is intentionally NOT in STATIC_TEST_ENV_VARS because:
-// - configure_cli_command() sets TERM=alacritty for hyperlink detection testing
-// - PTY tests (especially skim-based picker tests) need a TERM with valid terminfo
-// - macOS CI doesn't have alacritty terminfo, causing skim to fail
+/// Determinism knobs for a child whose stderr is a terminal, layered over
+/// [`STATIC_TEST_ENV_VARS`].
+///
+/// Output that appears only once an operation runs past a threshold is a
+/// function of machine load rather than of behavior, and a PTY test captures
+/// the raw byte stream — so it keeps every in-place redraw frame a terminal
+/// would have erased, elapsed-second counter and all. These pin such output to
+/// one state, off, so a snapshot records what the command did rather than how
+/// fast the machine was. A piped child needs none of them: the TTY half of
+/// each gate is already false there, which is why they'd only add noise to the
+/// `env:` block every `assert_cmd_snapshot!` records.
+pub const PTY_TEST_ENV_VARS: &[(&str, &str)] = &[
+    // The `Progress` and `Watchdog` spinners (src/progress.rs). Gates the
+    // render, not the counters.
+    ("WORKTRUNK_TEST_SPINNERS", "0"),
+];
+
+/// The paths an isolated wt subprocess is pointed at — everything in its
+/// environment that varies per fixture. See [`pty_env_vars`].
+pub struct TestEnvPaths<'a> {
+    /// `GIT_CONFIG_GLOBAL`.
+    pub git_config: &'a Path,
+    /// `HOME`, with `XDG_CONFIG_HOME` beneath it.
+    pub home: &'a Path,
+    /// `WORKTRUNK_CONFIG_PATH`.
+    pub wt_config: &'a Path,
+    /// `WORKTRUNK_APPROVALS_PATH`.
+    pub approvals: &'a Path,
+}
+
+/// Every environment variable a PTY-spawned wt subprocess needs: the
+/// [`STATIC_TEST_ENV_VARS`] and [`PTY_TEST_ENV_VARS`] baselines, plus `paths`.
+///
+/// A PTY child is spawned through `portable_pty::CommandBuilder`, which takes
+/// variables one at a time rather than a configured [`Command`] — so its
+/// environment has to exist as a value, which is what separates this from
+/// [`configure_cli_command`]. Every fixture that spawns one builds it here, so
+/// a new variable reaches all of them.
+pub fn pty_env_vars(paths: TestEnvPaths<'_>) -> Vec<(String, String)> {
+    let mut vars: Vec<(String, String)> = STATIC_TEST_ENV_VARS
+        .iter()
+        .chain(PTY_TEST_ENV_VARS)
+        .map(|&(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+    vars.extend(
+        [
+            ("GIT_CONFIG_GLOBAL", paths.git_config.display().to_string()),
+            ("GIT_CONFIG_SYSTEM", NULL_DEVICE.to_string()),
+            ("GIT_AUTHOR_DATE", "2025-01-01T00:00:00Z".to_string()),
+            ("GIT_COMMITTER_DATE", "2025-01-01T00:00:00Z".to_string()),
+            // Prevent git from prompting for credentials when running under a TTY
+            ("GIT_TERMINAL_PROMPT", "0".to_string()),
+            ("HOME", paths.home.display().to_string()),
+            (
+                "XDG_CONFIG_HOME",
+                paths.home.join(".config").display().to_string(),
+            ),
+            ("WORKTRUNK_TEST_EPOCH", TEST_EPOCH.to_string()),
+            (
+                "WORKTRUNK_CONFIG_PATH",
+                paths.wt_config.display().to_string(),
+            ),
+            (
+                "WORKTRUNK_SYSTEM_CONFIG_PATH",
+                DEFAULT_ISOLATED_SYSTEM_CONFIG.to_string(),
+            ),
+            (
+                "WORKTRUNK_APPROVALS_PATH",
+                paths.approvals.display().to_string(),
+            ),
+        ]
+        .map(|(key, value)| (key.to_string(), value)),
+    );
+
+    vars
+}
 
 /// Null device path, platform-appropriate.
 /// Use this for GIT_CONFIG_SYSTEM to disable system config in tests.
@@ -683,6 +791,7 @@ pub fn configure_cli_command(cmd: &mut Command) {
 /// - Deterministic commit timestamps
 /// - Consistent locale settings
 /// - No terminal prompts
+/// - No network transports (`GIT_ALLOWED_PROTOCOLS`)
 ///
 /// # Arguments
 /// * `cmd` - The git Command to configure
@@ -701,6 +810,7 @@ pub fn configure_git_cmd(cmd: &mut Command, git_config_path: &Path) {
     cmd.env("LANG", "C");
     cmd.env("WORKTRUNK_TEST_EPOCH", TEST_EPOCH.to_string());
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_ALLOW_PROTOCOL", GIT_ALLOWED_PROTOCOLS);
 }
 
 /// Configure a `Cmd`-based git command with isolated environment for testing.
@@ -720,6 +830,7 @@ pub fn configure_git_env(cmd: Cmd, git_config_path: &Path) -> Cmd {
         .env("LANG", "C")
         .env("WORKTRUNK_TEST_EPOCH", TEST_EPOCH.to_string())
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", GIT_ALLOWED_PROTOCOLS)
 }
 
 /// Shared interface for test repository fixtures.
@@ -1122,62 +1233,19 @@ impl TestRepo {
         configure_git_cmd(cmd, &self.git_config_path);
     }
 
-    /// Get standard test environment variables as a vector.
+    /// This repo's environment for a PTY-spawned wt subprocess.
     ///
-    /// This is useful for PTY tests and other cases where you need environment variables
-    /// as a vector rather than setting them on a Command.
-    ///
-    /// ## Related: `configure_cli_command()`
-    ///
-    /// Command-based tests use `configure_cli_command()`. Both functions share common
-    /// variables via `STATIC_TEST_ENV_VARS`. See that function's docs for differences.
+    /// Thin wrapper over [`pty_env_vars`], which documents the layering and is
+    /// where a new variable goes. Command-based tests use
+    /// [`configure_cli_command`] instead.
     #[cfg_attr(windows, allow(dead_code))] // Used only by unix PTY tests
     pub fn test_env_vars(&self) -> Vec<(String, String)> {
-        // Start with shared static env vars
-        let mut vars: Vec<(String, String)> = STATIC_TEST_ENV_VARS
-            .iter()
-            .map(|&(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-
-        // Add path-dependent variables specific to this TestRepo
-        vars.extend([
-            (
-                "GIT_CONFIG_GLOBAL".to_string(),
-                self.git_config_path.display().to_string(),
-            ),
-            ("GIT_CONFIG_SYSTEM".to_string(), NULL_DEVICE.to_string()),
-            (
-                "GIT_AUTHOR_DATE".to_string(),
-                "2025-01-01T00:00:00Z".to_string(),
-            ),
-            (
-                "GIT_COMMITTER_DATE".to_string(),
-                "2025-01-01T00:00:00Z".to_string(),
-            ),
-            // Prevent git from prompting for credentials when running under a TTY
-            ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
-            // Use test-specific home directory for isolation
-            ("HOME".to_string(), self.home_path().display().to_string()),
-            (
-                "XDG_CONFIG_HOME".to_string(),
-                self.home_path().join(".config").display().to_string(),
-            ),
-            ("WORKTRUNK_TEST_EPOCH".to_string(), TEST_EPOCH.to_string()),
-            (
-                "WORKTRUNK_CONFIG_PATH".to_string(),
-                self.test_config_path().display().to_string(),
-            ),
-            (
-                "WORKTRUNK_SYSTEM_CONFIG_PATH".to_string(),
-                "/etc/xdg/worktrunk/config.toml".to_string(),
-            ),
-            (
-                "WORKTRUNK_APPROVALS_PATH".to_string(),
-                self.test_approvals_path().display().to_string(),
-            ),
-        ]);
-
-        vars
+        pty_env_vars(TestEnvPaths {
+            git_config: &self.git_config_path,
+            home: self.home_path(),
+            wt_config: self.test_config_path(),
+            approvals: self.test_approvals_path(),
+        })
     }
 
     /// Configure shell integration for test environment.
@@ -3170,6 +3238,46 @@ fn is_leap_year(year: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A harness-built `git` reaches local paths and nothing else, so no test
+    /// can make an unbounded connect to whatever host a fixture URL names
+    /// (see [`GIT_ALLOWED_PROTOCOLS`]).
+    #[test]
+    fn test_harness_git_allows_local_paths_only() {
+        let repo = TestRepo::with_initial_commit();
+        let ls_remote = |url: &str| {
+            repo.git_command()
+                .args(["ls-remote", "--symref", url, "HEAD"])
+                .run()
+                .unwrap()
+        };
+
+        let local = ls_remote(&path_slash::PathExt::to_slash_lossy(repo.root_path()));
+        let local_stderr = String::from_utf8_lossy(&local.stderr);
+        assert!(
+            local.status.success(),
+            "local-path remote must still resolve: {local_stderr}"
+        );
+
+        let remote = ls_remote("https://github.com/test-owner/test-repo.git");
+        let stderr = String::from_utf8_lossy(&remote.stderr);
+        assert!(
+            stderr.contains("transport 'https' not allowed"),
+            "https transport must be refused, got: {stderr}"
+        );
+
+        // The opt-out has to clear the var, not narrow it: a value that still
+        // named a protocol list would silently keep the fixture clone offline,
+        // and the daily benchmark run is the only thing that would notice.
+        let mut opted_out = Command::new("git");
+        configure_git_cmd(&mut opted_out, Path::new(NULL_DEVICE));
+        allow_network_transports(&mut opted_out);
+        assert!(
+            opted_out
+                .get_envs()
+                .any(|(k, v)| k == "GIT_ALLOW_PROTOCOL" && v.is_none())
+        );
+    }
 
     #[test]
     fn test_unix_to_iso8601() {

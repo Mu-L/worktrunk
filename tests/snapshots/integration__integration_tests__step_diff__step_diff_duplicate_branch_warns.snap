@@ -1,16 +1,16 @@
 ---
-source: tests/integration_tests/switch.rs
+source: tests/integration_tests/step_diff.rs
 info:
   program: wt
   args:
-    - switch
-    - "mr:101"
+    - step
+    - diff
+    - "--branch=feature"
   env:
     APPDATA: "[TEST_CONFIG_HOME]"
     CLAUDE_CONFIG_DIR: "[TEST_CLAUDE_CONFIG]"
     CLICOLOR_FORCE: "1"
     COLUMNS: "500"
-    GIT_ALLOW_PROTOCOL: file
     GIT_AUTHOR_DATE: "2025-01-01T00:00:00Z"
     GIT_COMMITTER_DATE: "2025-01-01T00:00:00Z"
     GIT_CONFIG_GLOBAL: "[TEST_GIT_CONFIG]"
@@ -44,11 +44,12 @@ info:
     WORKTRUNK_TEST_ZSH_INSTALLED: "0"
     XDG_CONFIG_HOME: "[TEST_CONFIG_HOME]"
 ---
-success: false
-exit_code: 1
+success: true
+exit_code: 0
 ----- stdout -----
 
 ----- stderr -----
-[36m◎[39m [36mFetching MR !101...[39m
-[31m✗[39m [31mglab api failed for MR !101[39m
-[107m [0m glab: 401 Unauthorized (HTTP 401)
+[33m▲[39m [33mBranch [1mfeature[22m is checked out in 2 worktrees; wt uses the first:[39m
+[107m [0m _REPO_.feature
+[107m [0m _REPO_.feature-dup
+[2m↳[22m [2mTo drop a duplicate, run [4mgit worktree remove _REPO_.feature-dup[24m[22m

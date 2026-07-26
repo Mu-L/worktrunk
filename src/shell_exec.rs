@@ -666,32 +666,6 @@ pub fn shell_escape_for(mode: ShellEscapeMode, s: &str) -> String {
     }
 }
 
-// ============================================================================
-// Thread-Local Command Timeout
-// ============================================================================
-
-use std::cell::Cell;
-
-thread_local! {
-    /// Thread-local command timeout. When set, all commands executed via `run()` on this
-    /// thread will be killed if they exceed this duration.
-    ///
-    /// This is used by `wt switch` interactive picker to make the TUI responsive faster on large repos.
-    /// The timeout is set per-worker-thread in Rayon's thread pool.
-    static COMMAND_TIMEOUT: Cell<Option<Duration>> = const { Cell::new(None) };
-}
-
-/// Set the command timeout for the current thread.
-///
-/// When set, all commands executed via `run()` on this thread will be killed if they
-/// exceed the specified duration. Set to `None` to disable timeout.
-///
-/// This is typically called at the start of a Rayon worker task to apply timeout
-/// to all git operations within that task.
-pub fn set_command_timeout(timeout: Option<Duration>) {
-    COMMAND_TIMEOUT.with(|t| t.set(timeout));
-}
-
 /// Maximum lines of the bounded subprocess preview per stream. Exceeded
 /// content is elided with a `… (N more lines, M bytes elided)` marker; the
 /// full output is still written to `subprocess.log` via
@@ -853,12 +827,34 @@ fn format_stream_bounded(bytes: &[u8], prefix: &str) -> Vec<String> {
 /// Implementation of timeout-based command execution.
 ///
 /// Spawns reader threads to drain stdout/stderr concurrently (preventing deadlock when
-/// output exceeds the OS pipe buffer), then waits with timeout. On timeout, kills the
-/// child; scoped threads see EOF and join automatically before the function returns.
+/// output exceeds the OS pipe buffer), then waits with timeout. On timeout, tears down
+/// the child's whole process tree; scoped threads see EOF and join automatically before
+/// the function returns.
+///
+/// **The teardown reaches the tree, not just the child, because otherwise the timeout
+/// doesn't bound anything.** A grandchild inherits the child's stderr pipe, so a
+/// surviving one holds the write end open and `read_to_end` blocks until it exits —
+/// making this function return `TimedOut` only after the *grandchild's* full runtime.
+/// The case that matters is the one this timeout exists for: `git ls-remote` against an
+/// unreachable host spawns `git-remote-https`, which sits in `connect()` for ~127 s per
+/// address on Linux and does not notice that git died. So the child is spawned into its
+/// own process group and [`kill_timed_out_tree`] signals the group.
+///
+/// Isolating the group costs the kernel's tty broadcast: a Ctrl-C no longer reaches a
+/// timed child directly, so the user waits out the remaining timeout instead of
+/// interrupting it. That is bounded by the timeout the caller chose (seconds), whereas
+/// the orphan the alternative leaves behind — kill the child, stop waiting on the
+/// readers — holds a pipe for as long as its own operation takes, once per spawn.
 fn run_with_timeout_impl(
     cmd: &mut Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -898,6 +894,7 @@ fn run_with_timeout_impl(
                 })
             }
             None => {
+                kill_timed_out_tree(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 Err(std::io::Error::new(
@@ -907,6 +904,29 @@ fn run_with_timeout_impl(
             }
         }
     })
+}
+
+/// Tear down the process tree of a child that outlived its timeout.
+///
+/// `run_with_timeout_impl` made the child its own process-group leader, so its
+/// pid is the pgid and the TERM → KILL escalation reaches every member. SIGTERM
+/// first for the same reason [`signal_background_pid`] uses it: git's lockfile
+/// handlers run on TERM, so an interrupted git cleans up after itself.
+#[cfg(unix)]
+fn kill_timed_out_tree(pid: u32) {
+    forward_signal_with_escalation(pid as i32, signal_hook::consts::SIGTERM);
+}
+
+/// `taskkill /T` walks the child tree Windows has no process group for; `/F`
+/// forces. Best-effort — the pid may already be gone, or have left children
+/// that detached from it.
+#[cfg(windows)]
+fn kill_timed_out_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 // ============================================================================
@@ -1274,6 +1294,10 @@ impl Cmd {
     ///
     /// Note: Timeout is not supported by `.stream()` since streaming commands
     /// are interactive and should not be time-limited.
+    ///
+    /// A timed command runs in its own process group so expiry can tear down
+    /// its whole tree, which also means Ctrl-C no longer reaches it — see
+    /// `run_with_timeout_impl` for both halves of that.
     pub fn timeout(mut self, duration: std::time::Duration) -> Self {
         self.timeout = Some(duration);
         self
@@ -1476,9 +1500,6 @@ impl Cmd {
         let mut cmd = self.direct_command();
         self.apply_common_settings(&mut cmd);
 
-        // Determine effective timeout: explicit > thread-local > none
-        let effective_timeout = self.timeout.or_else(|| COMMAND_TIMEOUT.with(|t| t.get()));
-
         // Execute with or without stdin. Every branch produces a single
         // `Result<Output>` so spawn/write failures resolve the trace through
         // `record_captured` rather than `?`-ing past it (which would leave the
@@ -1508,7 +1529,7 @@ impl Cmd {
                 }
                 Err(e) => Err(e),
             }
-        } else if let Some(timeout_duration) = effective_timeout {
+        } else if let Some(timeout_duration) = self.timeout {
             // Timeout handling uses the existing impl
             run_with_timeout_impl(&mut cmd, timeout_duration)
         } else {
@@ -2470,6 +2491,31 @@ mod tests {
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
     }
 
+    /// The timeout has to bound wall-clock, not just signal the direct child.
+    /// A grandchild inherits the child's stderr pipe, so one that survives the
+    /// kill holds the write end open and the output readers block on it — which
+    /// used to make `run()` return `TimedOut` only once the *grandchild* exited
+    /// (30 s here, ~127 s for the `git-remote-https` case this bound exists
+    /// for). `; :` keeps the shell from `exec`ing sleep, so there really is a
+    /// grandchild to leave behind.
+    #[test]
+    #[cfg(unix)]
+    fn test_cmd_timeout_bounds_wall_clock_with_surviving_grandchild() {
+        let start = std::time::Instant::now();
+        let err = Cmd::new("sh")
+            .args(["-c", "sleep 30; :"])
+            .timeout(Duration::from_millis(200))
+            .run()
+            .unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "timeout waited on the grandchild: {elapsed:?}"
+        );
+    }
+
     #[test]
     fn test_cmd_without_timeout_completes() {
         let result = Cmd::new("echo").arg("no timeout").run();
@@ -2492,51 +2538,6 @@ mod tests {
         let output = result.unwrap();
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("hello from stdin"));
-    }
-
-    #[test]
-    fn test_thread_local_timeout_setting() {
-        // Initially no timeout (or whatever was set by previous test)
-        let initial = COMMAND_TIMEOUT.with(|t| t.get());
-
-        // Set a timeout
-        set_command_timeout(Some(Duration::from_millis(100)));
-        let after_set = COMMAND_TIMEOUT.with(|t| t.get());
-        assert_eq!(after_set, Some(Duration::from_millis(100)));
-
-        // Clear the timeout
-        set_command_timeout(initial);
-        let after_clear = COMMAND_TIMEOUT.with(|t| t.get());
-        assert_eq!(after_clear, initial);
-    }
-
-    #[test]
-    fn test_cmd_uses_thread_local_timeout() {
-        // Set no timeout (ensure fast completion)
-        set_command_timeout(None);
-
-        let result = Cmd::new("echo").arg("thread local test").run();
-        assert!(result.is_ok());
-
-        // Clean up
-        set_command_timeout(None);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_cmd_thread_local_timeout_kills_slow_command() {
-        // Set a short thread-local timeout
-        set_command_timeout(Some(Duration::from_millis(50)));
-
-        // Command that would take too long
-        let result = Cmd::new("sleep").arg("10").run();
-
-        // Should be killed by the thread-local timeout
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
-
-        // Clean up
-        set_command_timeout(None);
     }
 
     // ========================================================================
@@ -2616,10 +2617,13 @@ mod tests {
 
     #[test]
     fn test_cmd_run_file_current_dir_is_errored() {
-        let file = tempfile::NamedTempFile::new().unwrap();
+        // Any existing non-directory path will do, and the test binary is one,
+        // so this creates nothing in the system temp directory — a shared
+        // namespace where Windows can deny a fresh temp name outright ("Access
+        // is denied.") rather than report a collision tempfile would retry.
         let err = Cmd::new("sh")
             .args(["-c", "true"])
-            .current_dir(file.path())
+            .current_dir(std::env::current_exe().unwrap())
             .run()
             .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::NotADirectory);
