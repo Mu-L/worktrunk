@@ -150,7 +150,7 @@ pub fn repo() -> TestRepo {
 /// ```
 #[rstest::fixture]
 pub fn temp_home() -> TempDir {
-    TempDir::new().unwrap()
+    test_tempdir()
 }
 
 /// Canonicalize a `temp_home` for use as a base when building paths that
@@ -908,38 +908,38 @@ fn add_temp_home_filters(settings: &mut insta::Settings, temp_home: &Path) {
     );
 }
 
-/// Catch tempfile::tempdir() paths under non-standard OS temp directories.
+/// Catch temp paths under whichever roots the suite actually creates them in.
 ///
-/// `add_project_id_filters` has hardcoded patterns for standard temp locations
-/// (/tmp, /var/folders, C:/Users/.../AppData/Local/Temp). CI may use a different
-/// TEMP (e.g., D:\tmp for faster I/O on Windows). This filter uses the runtime
-/// temp directory to catch those paths.
+/// Two roots are live: the fixtures use [`test_temp_root`], and a test that
+/// reaches for `tempfile` directly lands in the OS temp dir — which CI may
+/// point somewhere non-standard (e.g. D:\tmp for faster I/O on Windows).
+/// Deriving both at runtime covers them without another hardcoded platform
+/// path; `add_project_id_filters` keeps the hardcoded set for paths that
+/// arrive from a subprocess whose temp dir isn't ours.
 fn add_os_temp_dir_filter(settings: &mut insta::Settings) {
-    let temp_dir = std::env::temp_dir();
-    let temp_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
-    let temp_dir_str = temp_dir_str.trim_end_matches('/');
+    for root in [std::env::temp_dir(), test_temp_root().to_path_buf()] {
+        let root_str = root.to_string_lossy().replace('\\', "/");
+        let root_str = root_str.trim_end_matches('/').to_string();
 
-    let canonical = canonicalize(&temp_dir).unwrap_or_else(|_| temp_dir.clone());
-    let canonical_str = canonical.to_string_lossy().replace('\\', "/");
-    let canonical_str = canonical_str.trim_end_matches('/');
+        let canonical = canonicalize(&root).unwrap_or_else(|_| root.clone());
+        let canonical_str = canonical.to_string_lossy().replace('\\', "/");
+        let canonical_str = canonical_str.trim_end_matches('/').to_string();
 
-    // Canonical (longer) path first so it matches before the shorter one
-    // (e.g., /private/var/folders/... before /var/folders/... on macOS).
-    settings.add_filter(
-        &format!(
-            r"'?{}/\.tmp[^/']+/[^)'\s\x1b]+'?",
-            regex::escape(canonical_str)
-        ),
-        "[PROJECT_ID]",
-    );
-    if canonical_str != temp_dir_str {
+        // Canonical (longer) path first so it matches before the shorter one
+        // (e.g., /private/var/folders/... before /var/folders/... on macOS).
         settings.add_filter(
             &format!(
                 r"'?{}/\.tmp[^/']+/[^)'\s\x1b]+'?",
-                regex::escape(temp_dir_str)
+                regex::escape(&canonical_str)
             ),
             "[PROJECT_ID]",
         );
+        if canonical_str != root_str {
+            settings.add_filter(
+                &format!(r"'?{}/\.tmp[^/']+/[^)'\s\x1b]+'?", regex::escape(&root_str)),
+                "[PROJECT_ID]",
+            );
+        }
     }
 }
 

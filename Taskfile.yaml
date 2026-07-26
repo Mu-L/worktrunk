@@ -28,7 +28,9 @@ tasks:
       # TMPDIR points at a fresh directory: it keeps the run's temp churn off
       # the shared temp root, and whatever survives is a leak the suite owns.
       - TMPDIR={{.RUN_TMP}} /usr/bin/time cargo nextest run --profile perf --features shell-integration-tests {{.CLI_ARGS}}
-      - echo "temp entries surviving the run (each one is a leak):"; find {{.RUN_TMP}} -maxdepth 1 -mindepth 1 | sed 's|.*/|  |'
+      # Fixtures nest under `wt/` (test_temp_root), so look a level in. Only
+      # `wt/isolated-cwd` and `wt-test-profraw` are expected to survive.
+      - echo "temp entries surviving the run (each one is a leak):"; find {{.RUN_TMP}} -mindepth 1 -maxdepth 2 | sed "s|{{.RUN_TMP}}|  |"
       - echo "per-test timings in target/nextest/perf/junit.xml"
 
   setup-web:

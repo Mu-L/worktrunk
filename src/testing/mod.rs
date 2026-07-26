@@ -437,6 +437,48 @@ pub fn scrub_git_path_vars(cmd: &mut Command) {
     }
 }
 
+/// Root for every temp directory the test fixtures create: one subdirectory of
+/// the system temp dir rather than hundreds of siblings directly inside it.
+///
+/// Entries in the shared temp root are cheap to ignore but expensive to *walk*,
+/// and `git::recover::recover_from_path` reads every ancestor directory of a
+/// deleted CWD looking for the repo a removed worktree belonged to. A fixture
+/// rooted directly in the shared dir pays for everything the machine has put
+/// there; rooted here it pays for the handful of fixtures currently alive.
+///
+/// Staying under the system temp dir is deliberate. Somewhere below `$HOME`
+/// would give an even smaller ancestor chain, but it puts the fixtures inside
+/// the reach of a conditional `includeIf "gitdir:<home>"` in the developer's
+/// git config — and tests that drive git through `Repository::run_command`
+/// (rather than [`configure_git_env`]) inherit it, so `commit.gpgsign` there
+/// fails their commits.
+///
+/// The name is two characters because a unix socket path can't exceed
+/// `sun_path` (104 bytes on macOS, including the NUL). macOS's per-user
+/// `$TMPDIR` is 56 canonicalized characters, and
+/// `test_copy_ignored_skips_non_regular_files` binds a listener at
+/// `<fixture>/repo/target/test.sock` — 89 bytes before this directory exists at
+/// all. Every character here comes out of the 14 that were spare;
+/// `worktrunk-tests` overflowed by one.
+///
+/// Created on first use and left in place; what goes inside it are `TempDir`s
+/// that remove themselves on drop, so it stays near-empty between runs.
+pub fn test_temp_root() -> &'static Path {
+    static ROOT: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+        let root = std::env::temp_dir().join("wt");
+        std::fs::create_dir_all(&root).expect("create test temp root");
+        root
+    });
+    ROOT.as_path()
+}
+
+/// Create a temp directory under [`test_temp_root`].
+///
+/// The fixtures' replacement for `TempDir::new()` / `tempfile::tempdir()`.
+pub fn test_tempdir() -> TempDir {
+    TempDir::new_in(test_temp_root()).expect("create test temp dir")
+}
+
 /// A single fixed empty directory used as the default `current_dir` for
 /// [`wt_command`], created on first use and shared by every test process.
 ///
@@ -456,7 +498,7 @@ pub fn scrub_git_path_vars(cmd: &mut Command) {
 /// 14-34s on a developer machine. One fixed directory never grows.
 fn isolated_test_cwd() -> &'static Path {
     static ISOLATED_CWD: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
-        let dir = std::env::temp_dir().join("worktrunk-test-cwd");
+        let dir = test_temp_root().join("isolated-cwd");
         std::fs::create_dir_all(&dir).expect("create isolated test cwd");
         dir
     });
@@ -896,7 +938,7 @@ impl TestRepo {
     /// Also sets up mock gh/glab commands that appear authenticated to prevent
     /// CI status hints from appearing in test output.
     pub fn standard() -> Self {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = test_tempdir();
 
         // Copy from standard fixture (includes worktrees and remote)
         let fixture = copy_standard_fixture(temp_dir.path());
@@ -946,7 +988,7 @@ impl TestRepo {
     pub fn at(path: &Path) -> Self {
         std::fs::create_dir_all(path).unwrap();
 
-        let config_dir = TempDir::new().unwrap();
+        let config_dir = test_tempdir();
         let test_config_path = config_dir.path().join("test-config.toml");
         let test_approvals_path = config_dir.path().join("test-approvals.toml");
         let git_config_path = config_dir.path().join("test-gitconfig");
@@ -997,7 +1039,7 @@ impl TestRepo {
     /// arguments, and returns a `TestRepo` with no commits and no identity
     /// in local config. Callers add identity or other setup as needed.
     fn init_repo(git_args: &[&str]) -> Self {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = test_tempdir();
         let root = temp_dir.path().join("repo");
         std::fs::create_dir(&root).unwrap();
 
@@ -2539,7 +2581,7 @@ impl BareRepoTest {
     /// to be created as subdirectories (e.g., `repo/main`, `repo/feature`).
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_dir = test_tempdir();
         // Bare repo without .git suffix - worktrees go inside as subdirectories
         let bare_repo_path = temp_dir.path().join("repo");
         let test_config_path = temp_dir.path().join("test-config.toml");
