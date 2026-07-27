@@ -18,6 +18,16 @@ A target-filtered run (`--lib`, `--test integration`, …) on a fresh `target/` 
 
 **The gate runs one platform, so `#[cfg(unix)]` hides dead code from it.** A helper, const, or import whose every use sits behind `#[cfg(unix)]` is live locally and dead on Windows, where `-D warnings` fails `test (windows)` with "never used". Gate the item with the same predicate as its uses. Cross-compiling to check locally doesn't work: the C build scripts (tree-sitter, libmimalloc-sys) fail before the Rust lint runs.
 
+## One Result Per Test, Whatever Runs It
+
+Five runners execute this suite — `cargo test`, `cargo nextest run`, `cargo llvm-cov nextest`, `cargo bench`, and the Nix `worktrunk-tests` derivation — and CI uses several of them on the same commit. **A test's result must not depend on which one started it.**
+
+So `.config/nextest.toml` carries no setting that changes what a test observes: no `[env]`, and no setup script exporting through `$NEXTEST_ENV`. Anything load-bearing goes where every runner sees it — `.cargo/config.toml` for environment (see Git Config Isolation), the fixture itself for behavior.
+
+A nextest-only knob doesn't fail loudly when another runner misses it. It yields a *different result*, and the runner that disagrees is typically `cargo llvm-cov` — whose numbers gate a merge, and whose disagreement therefore reads as a coverage regression rather than as missing configuration.
+
+The one setup script here, `build-bins`, is a build step rather than a behavior setting: it compiles the `mock-stub` helper a target-filtered run would otherwise skip, and the same gap under plain `cargo test` is handled by `default-members` (see Running the Suite). It carries its own TODO to disappear once cargo-dist supports per-binary exclusion. It is not precedent.
+
 ## Profiling the Suite
 
 ```bash
