@@ -103,10 +103,11 @@ call `.current_dir(...)` explicitly.
 
 ### Where a new environment variable goes
 
-A test child's environment is three layers, each with one home in
+A test child's environment is four layers, each with one home in
 `src/testing/mod.rs`: `STATIC_TEST_ENV_VARS` for a determinism knob every child
-needs, `PTY_TEST_ENV_VARS` for one only a terminal triggers, and `pty_env_vars`
-for a path that varies per fixture. `configure_cli_command` and
+needs, `git_test_env` for git isolation (config, timestamps, the transport
+deny), `PTY_TEST_ENV_VARS` for a knob only a terminal triggers, and
+`pty_env_vars` for a path that varies per fixture. `configure_cli_command` and
 `configure_pty_command` apply them by transport, so a variable added to the
 right layer reaches every test that spawns `wt`. A per-builder copy reaches only
 the tests that happen to use that builder, and the ones it misses fail later,
@@ -148,6 +149,17 @@ approvals.approve_command(project, command, &approvals_path).unwrap();
 
 </good>
 </example>
+
+Git needs the same care. An in-process `Repository::run_command()` spawns git
+with the test process's environment, so it reads the developer's real
+`~/.gitconfig` and none of `configure_git_env`'s variables — no
+`GIT_CONFIG_GLOBAL`, no `GIT_ALLOW_PROTOCOL`. The repo's own config is the one
+layer such a command still reads, so every `TestRepo` constructor appends
+`LOCAL_TEST_CONFIG` (identity, `commit.gpgsign`, and the `protocol.allow`
+transport deny) to it. `TestRepo::assemble` is the single call site; a new
+constructor routes through it and inherits the settings, and the bare
+fixtures (`BareRepoTest`, `NestedBareRepoTest`) get them by composing over
+`TestRepo`.
 
 `approvals_path()` panics when `WORKTRUNK_APPROVALS_PATH` is unset, but
 `#[cfg(test)]` makes that guard fire only for `worktrunk` lib-crate tests. A
