@@ -193,13 +193,24 @@ approvals.approve_command(project, command, &approvals_path).unwrap();
 </good>
 </example>
 
-`approvals_path()` panics when `WORKTRUNK_APPROVALS_PATH` is unset, but
-`#[cfg(test)]` makes that guard fire only for `worktrunk` lib-crate tests. A
-bin-crate test (anything under `src/commands/`) links the lib in non-test
-mode, so the guard is compiled out and a global read hits the real config
-silently: it passes wherever `$HOME` is writable and fails only in a sandbox
-that forbids it. `config_path()` and `system_config_path()` have no guard at
-all.
+`approvals_path()` and `config_path()` panic when their env var is unset rather
+than resolving the developer's real `~/.config/worktrunk/`. `config_path()` is
+the one that matters most: `set_skip_shell_integration_prompt` and
+`set_skip_commit_generation_prompt` reach it to **write**, so an unguarded
+fall-through edits the config the developer is using.
+
+`#[cfg(test)]` makes both guards fire for `worktrunk` lib-crate tests only. A
+bin-crate test (anything under `src/commands/` or `src/output/`) links the lib
+in non-test mode, so the guard is compiled out there and a global read hits the
+real config silently: it passes wherever `$HOME` is writable and fails only in a
+sandbox that forbids it. Nothing exercises that today — 968 bin-crate tests
+create no config under a scratch `$HOME`, and 2,388 in-process tests are
+indifferent to a hostile one planted there — so it's a live requirement on new
+tests, not a known leak.
+
+`system_config_path()` is deliberately unguarded: it resolves a machine-wide
+file rather than the developer's own, and `config::deprecation`'s
+`PendingDefault` rules need the lookup.
 
 ## Timing Tests: Polling and Absence Windows
 
