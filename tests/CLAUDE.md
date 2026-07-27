@@ -170,8 +170,8 @@ That layer is the one that can cover git spawned **in-process**. `TestRepo` expo
 
 Everything else is downstream of that floor, not a second guarantee:
 
-- `configure_git_env` / `configure_git_cmd` — used by `TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()` — override `GIT_CONFIG_GLOBAL` with a per-`TestRepo` copy of the same file plus a test identity, so a test can append to its own git config without reaching any other test's.
-- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes these two through, so a subprocess inherits the same floor. `pty_env_vars` points a PTY child at the same per-`TestRepo` copy.
+- `configure_git_env` / `configure_git_cmd` — used by `TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()` — override `GIT_CONFIG_GLOBAL` with `dev/test-gitconfig`, which `[include]`s the floor and adds an identity. It is checked in and read-only: the content is identical for every test, so `test_gitconfig_path()` hands out the path rather than writing a copy. Writing one is what costs — a single shared path has every test process racing to write one name, which on Windows means renaming over a file another process holds open, and a copy per process leaks one entry per test.
+- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes these two through, so a subprocess inherits the same floor. `pty_env_vars` points a PTY child at the same file.
 
 Two things follow that are easy to get wrong:
 

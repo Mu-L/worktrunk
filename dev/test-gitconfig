@@ -1,0 +1,24 @@
+# The gitconfig `configure_git_env` points `GIT_CONFIG_GLOBAL` at, for every
+# `git` the harness builds. Shared and read-only: the content is the same for
+# every test, so `test_gitconfig_path()` hands out this path rather than
+# writing a copy per test — nothing to create, nothing to race on, nothing to
+# leak.
+#
+# It is the hermetic floor plus an identity. The include is what keeps the two
+# from drifting: this file overrides the `GIT_CONFIG_GLOBAL` that
+# `.cargo/config.toml` installs, so restating those settings here would let a
+# harness-built git resolve different config from the in-process git it is
+# testing. A relative include path resolves against the including file, so this
+# works wherever the checkout sits.
+#
+# The identity is here and not in `hermetic-gitconfig` on purpose: that file is
+# also the floor for git spawned *in-process*, where `user.useConfigOnly` and
+# the absence of a name are what turn a fixture that forgot its own identity
+# into an error rather than a commit authored from the host's username.
+
+[include]
+	path = hermetic-gitconfig
+
+[user]
+	name = Test User
+	email = test@example.com

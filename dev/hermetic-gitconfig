@@ -4,14 +4,14 @@
 # at this file for every process cargo starts, so a `git` spawned in-process by
 # a test — including one production code runs through `Repository::run_command`
 # — resolves config from this file plus the fixture repo's own `.git/config`,
-# never from the developer's `~/.gitconfig`. `write_test_gitconfig` embeds this
-# file and appends an identity for the per-`TestRepo` copy that
-# `configure_git_env` installs.
+# never from the developer's `~/.gitconfig`. The sibling `test-gitconfig`, which
+# `configure_git_env` installs over this one for harness-built commands,
+# `[include]`s this file and adds an identity — so the two cannot drift.
 #
-# Embedding is what puts it in `dev/` rather than beside the other fixtures: it
-# makes the file a compile-time input to the library, and `dev/` is the
+# Both live in `dev/` rather than beside the other fixtures because that is the
 # directory the crates.io archive and the `flake.nix` source filter already
-# carry for that reason. `embedded_assets_ship_in_package` pins the rule.
+# carry, and a path in `.cargo/config.toml` has to resolve wherever the checkout
+# sits. `embedded_assets_ship_in_package` pins the rule.
 #
 # There is deliberately no `[user] name`/`email` here. Identity belongs to the
 # fixture repo's local config, and `useConfigOnly` turns a fixture that forgot

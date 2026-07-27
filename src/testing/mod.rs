@@ -284,48 +284,20 @@ fn copy_standard_fixture(dest: &Path) -> FixtureWorktrees {
     FixtureWorktrees { worktrees, remote }
 }
 
-/// The suite's hermetic git config, embedded from the file `.cargo/config.toml`
-/// installs as `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`. Embedding rather
-/// than re-stating it keeps [`test_gitconfig_path`], which overrides that
-/// floor, from drifting away from it.
-const HERMETIC_GITCONFIG: &str = include_str!("../../dev/hermetic-gitconfig");
-
-/// The identity [`test_gitconfig_path`] appends to [`HERMETIC_GITCONFIG`].
-///
-/// It is absent from the shared file on purpose — see the comment there.
-const TEST_IDENTITY_GITCONFIG: &str = r#"
-[user]
-	name = Test User
-	email = test@example.com
-"#;
-
 /// The gitconfig that harness-built commands point `GIT_CONFIG_GLOBAL` at
-/// (see [`configure_git_env`]). The content is identical for every test, so
-/// one file per process serves them all. Settings that must also hold for git
-/// spawned in-process go in `LOCAL_TEST_CONFIG` instead.
+/// (see [`configure_git_env`]). Settings that must also hold for git spawned
+/// in-process go in `LOCAL_TEST_CONFIG` instead.
 ///
-/// The content is `HERMETIC_GITCONFIG` plus an identity, rather than a
-/// restatement: this file overrides the process-wide floor
-/// `.cargo/config.toml` installs, so re-typing its settings here would let the
-/// two drift, and a test would silently resolve different config from the
-/// in-process git it is testing.
-///
-/// A fixed path under [`test_temp_root`] rather than a `TempDir` in a `static`:
-/// a static never runs its destructor, so under nextest's process-per-test
-/// model that leaks one directory per test. Every process writes identical
-/// bytes, and [`crate::utils::write_atomically`] renames over the target, so concurrent
-/// writers can't produce a torn read.
+/// A checked-in file rather than one written at runtime. Its content is the
+/// same for every test in every process, so there is nothing to generate — and
+/// generating it is what a shared path makes expensive: a single copy has every
+/// test process racing to write one name, which on Windows means renaming over
+/// a file another process holds open, while a copy per process leaks one entry
+/// per test under nextest. `dev/test-gitconfig` includes `dev/hermetic-gitconfig`
+/// rather than restating it, so this file cannot drift from the floor it
+/// overrides.
 pub fn test_gitconfig_path() -> &'static Path {
-    static GITCONFIG: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
-        let path = test_temp_root().join("test-gitconfig");
-        crate::utils::write_atomically(
-            &path,
-            &format!("{HERMETIC_GITCONFIG}{TEST_IDENTITY_GITCONFIG}"),
-        )
-        .expect("write test gitconfig");
-        path
-    });
-    GITCONFIG.as_path()
+    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/dev/test-gitconfig"))
 }
 
 /// Settings written into every test repo's own config by
