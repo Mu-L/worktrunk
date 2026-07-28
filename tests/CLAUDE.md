@@ -172,15 +172,17 @@ reads in production drops `TEST` and keeps `WORKTRUNK_`.
 
 ## Git Config Isolation
 
-**No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. The guarantee is environment, with no git-config file anywhere in the repo. `.cargo/config.toml` points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist, and supplies the settings the suite needs through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, for every process cargo starts.
+**No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. The guarantee is environment, with no git-config file anywhere in the repo. `.cargo/config.toml` points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist, for every process cargo starts.
 
-That layer is the one that can cover git spawned **in-process**. `TestRepo` exposes a `repo` field of the production `Repository` type, and `Repository::run_command` builds a plain `Cmd::new("git")` — no per-command hook the fixtures could reach, whether the call is test setup or the production code under test. A variable can only be set before the process starts (`std::env::set_var` is `unsafe`, and the crate forbids `unsafe`), so the runner is the only place it can come from.
+**It has to be the runner, not a fixture.** Every other test variable is set on a *child*: `git_test_env` on a git command, `configure_cli_command` on a `wt` subprocess. In-process git is not a child the test configures. `TestRepo` exposes a `repo` field of the production `Repository` type, and `Repository::run_command` builds a plain `Cmd::new("git")`, so what it reads is the test process's own environment, whether the call is test setup or the code under test. A test cannot set that for itself — `std::env::set_var` is `unsafe`, the crate forbids `unsafe`, and under `cargo test` the tests sharing that process run in parallel threads — so the variable can only come from before the process started.
 
 Everything else is downstream of that floor, not a second guarantee:
 
 - `git_test_env` — reaching git through `configure_git_env` / `configure_git_cmd` (`TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()`) and a PTY child through `pty_env_vars` — restates the deny pair per command and adds the test identity.
-- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes the whole `GIT_CONFIG_*` family through, so a subprocess inherits the same floor. Dropping the numbered members would leave a child with the denial but none of the settings it was denying *for*.
-- `pty_env_vars` copies that family across by hand, because a PTY child is `env_clear`ed and inherits nothing. `pty_env_vars_carry_the_git_config_floor` pins it: the settings only quiet advice and refuse a guessed identity, so no PTY assertion would notice them going missing.
+- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes the whole `GIT_CONFIG_*` family through, so a subprocess inherits the same floor.
+- `pty_env_vars` copies that family across by hand, because a PTY child is `env_clear`ed and inherits nothing. `pty_env_vars_carry_the_git_config_floor` pins it: `useConfigOnly` fires only where an identity is missing, so no PTY assertion would notice it going missing.
+
+**The floor carries one setting, `user.useConfigOnly`.** Denial alone puts git on its own defaults, which is what the suite wants for everything else; `useConfigOnly` is the exception because a default git *guesses* an identity from the OS username and hostname rather than failing, which is the one way a hermetic suite could still author a commit as the developer. Nothing exercises it, so it is a backstop rather than a behavior: keep it because without it a future gap goes silent. `commit.gpgsign`, `advice.mergeConflict`, `advice.resolveConflict` and `rerere.enabled` were in the floor and are gone — disabling all four and running 4,611 tests failed nothing but the assertion on the floor's own contents.
 
 Three things follow that are easy to get wrong:
 

@@ -27,9 +27,10 @@
 //!
 //! No `git` the suite runs reads the developer's `~/.gitconfig`. The guarantee
 //! is environment, not a file: `.cargo/config.toml` points
-//! `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist
-//! and supplies the settings the suite needs through `GIT_CONFIG_COUNT`, for
-//! every process cargo starts. That is the only layer that can cover git
+//! `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist,
+//! and adds `user.useConfigOnly` through `GIT_CONFIG_COUNT` so a git with no
+//! identity fails rather than guessing one from the host, for every process
+//! cargo starts. That is the only layer that can cover git
 //! spawned *in-process*: `Repository::run_command` builds a plain
 //! `Cmd::new("git")`, so a test driving production code has no per-command hook
 //! to reach, and a variable can only be set before the process starts
@@ -3657,13 +3658,7 @@ mod tests {
             .filter(|line| line.starts_with("command line:"))
             .map(|line| line.trim_start_matches("command line:").trim())
             .collect();
-        insta::assert_snapshot!(from_env.join("\n"), @r"
-        user.useconfigonly=true
-        advice.mergeconflict=false
-        advice.resolveconflict=false
-        commit.gpgsign=false
-        rerere.enabled=true
-        ");
+        insta::assert_snapshot!(from_env.join("\n"), @"user.useconfigonly=true");
 
         // Nothing outside the fixture contributes. Git reports the repo's own
         // config at a path relative to it, so the only two origins a resolved

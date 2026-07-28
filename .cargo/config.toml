@@ -31,7 +31,19 @@ GIT_CONFIG_GLOBAL = { value = "/nonexistent/wt/gitconfig", force = true }
 GIT_CONFIG_SYSTEM = { value = "/nonexistent/wt/gitconfig", force = true }
 
 # `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` are git's
-# environment spelling of `-c`, so these five apply wherever the deny pair does.
+# environment spelling of `-c`, so this applies wherever the deny pair does.
+#
+# Only `useConfigOnly` is here, because it is the only setting that has work to
+# do once the host's config is denied. It stops git *guessing* an identity from
+# the OS username and hostname when none is configured, which is the one way a
+# hermetic suite could still author a commit as the developer. Nothing exercises
+# it — every path sets an identity — so it is a backstop, and the reason to keep
+# it is that without it a future gap goes silent instead of failing.
+#
+# `commit.gpgsign`, `advice.mergeConflict`, `advice.resolveConflict` and
+# `rerere.enabled` were here and are gone: they predate the denial, which
+# already puts git on its own defaults for all four. Disabling the whole set and
+# running 4,611 tests failed nothing but the assertion on this list's contents.
 #
 # That spelling also sets their precedence: `-c` outranks a repository's own
 # config, where a global *file* would yield to it. So a key belongs here only
@@ -42,17 +54,9 @@ GIT_CONFIG_SYSTEM = { value = "/nonexistent/wt/gitconfig", force = true }
 #
 # There is deliberately no identity. Cargo applies this table to a developer's
 # `cargo run -- <cmd>` as much as to the suite, so a name here would author
-# their commits as `Test User`; without one, `user.useConfigOnly` fails that
-# commit instead. Tests get their identity from `git_test_env` (harness-built
-# git) and `LOCAL_TEST_CONFIG` (in-process git).
-GIT_CONFIG_COUNT = { value = "5", force = true }
+# their commits as `Test User`; without one, `useConfigOnly` fails that commit
+# instead. Tests get their identity from `git_test_env` (harness-built git) and
+# `LOCAL_TEST_CONFIG` (in-process git).
+GIT_CONFIG_COUNT = { value = "1", force = true }
 GIT_CONFIG_KEY_0 = { value = "user.useConfigOnly", force = true }
 GIT_CONFIG_VALUE_0 = { value = "true", force = true }
-GIT_CONFIG_KEY_1 = { value = "advice.mergeConflict", force = true }
-GIT_CONFIG_VALUE_1 = { value = "false", force = true }
-GIT_CONFIG_KEY_2 = { value = "advice.resolveConflict", force = true }
-GIT_CONFIG_VALUE_2 = { value = "false", force = true }
-GIT_CONFIG_KEY_3 = { value = "commit.gpgsign", force = true }
-GIT_CONFIG_VALUE_3 = { value = "false", force = true }
-GIT_CONFIG_KEY_4 = { value = "rerere.enabled", force = true }
-GIT_CONFIG_VALUE_4 = { value = "true", force = true }
