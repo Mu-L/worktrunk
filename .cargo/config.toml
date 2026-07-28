@@ -12,8 +12,9 @@ COLUMNS = "80"
 # config from these two variables alone, and a variable can only be set before
 # the process starts, so this is the one layer that covers in-process git.
 # Everything else is downstream of it: `configure_git_env` overrides
-# `GIT_CONFIG_GLOBAL` with a per-`TestRepo` copy, and `isolate_subprocess_env`
-# lets both pass through to `wt` children rather than scrubbing them.
+# `GIT_CONFIG_GLOBAL` with `dev/test-gitconfig`, which includes this file and
+# adds a test identity, and `isolate_subprocess_env` lets both pass through to
+# `wt` children rather than scrubbing them.
 #
 # Without it the suite reads whatever the developer configured — `commit.gpgsign`
 # fails every fixture commit, `core.hooksPath` runs their hooks, `core.fsmonitor`

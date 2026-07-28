@@ -13,10 +13,11 @@
 # carry, and a path in `.cargo/config.toml` has to resolve wherever the checkout
 # sits. `embedded_assets_ship_in_package` pins the rule.
 #
-# There is deliberately no `[user] name`/`email` here. Identity belongs to the
-# fixture repo's local config, and `useConfigOnly` turns a fixture that forgot
-# one into an error rather than a commit authored from the host's username and
-# hostname — which would be neither hermetic nor reproducible.
+# There is deliberately no `[user] name`/`email` here. Cargo installs this file
+# for a developer's `cargo run -- <cmd>` as much as for the suite, so a name
+# would author their commits as Test User; without one, `useConfigOnly` fails
+# that commit instead. Tests read their identity from `test-gitconfig` and from
+# each fixture repo's local config.
 
 [user]
 	useConfigOnly = true

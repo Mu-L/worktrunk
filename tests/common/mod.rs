@@ -825,10 +825,6 @@ fn add_temp_path_placeholder_filters(settings: &mut insta::Settings) {
         &format!(r"{TEST_PATH_PREFIX}test-approvals\.toml'?"),
         "[TEST_APPROVALS]",
     );
-    settings.add_filter(
-        r"(?:[A-Z]:)?/[^\s]+/\.tmp[^/]+/test-gitconfig",
-        "[TEST_GIT_CONFIG]",
-    );
 }
 
 /// Strip ANSI codes immediately wrapping a path-redaction placeholder so a

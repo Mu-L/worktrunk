@@ -175,7 +175,7 @@ Everything else is downstream of that floor, not a second guarantee:
 
 Two things follow that are easy to get wrong:
 
-- **Identity lives in the fixture repo's local config**, not the hermetic file. `user.useConfigOnly` there turns a fixture that forgot one into an error, rather than a commit authored from the host's username and hostname. Every `TestRepo` constructor already sets it.
+- **Identity has two homes, and the floor is neither.** A harness-built git reads it from `dev/test-gitconfig`; an in-process git reads it from the fixture repo's local config, which every `TestRepo` constructor writes. The floor carries none because `cargo run -- <cmd>` resolves it too, where `useConfigOnly` fails a developer's commit rather than authoring it as Test User.
 - **Where fixtures live carries no isolation weight.** A conditional `includeIf "gitdir:<home>"` can't reach them wherever they sit, so `test_temp_root()`'s location is a question of ancestor-walk cost alone.
 
 What the hole cost before this: any key in the developer's config applied to fixture repos, so `commit.gpgsign` failed their commits, `core.hooksPath` ran their hooks, and `core.fsmonitor` / `credential.helper` / `filter.*` ran programs of their choosing. A conditional `includeIf` made which of those happened depend on where `$TMPDIR` sat — the suite passed by accident of the temp dir being outside `$HOME`.

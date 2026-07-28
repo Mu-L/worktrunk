@@ -37,8 +37,8 @@
 //! The rest is downstream of it:
 //!
 //! - [`configure_git_env`] / [`configure_git_cmd`] override `GIT_CONFIG_GLOBAL`
-//!   with a per-`TestRepo` copy of that file plus a test identity, so a test can
-//!   edit its own git config without touching any other test's.
+//!   with `dev/test-gitconfig`, which `[include]`s that file and adds the test
+//!   identity. It is checked in and read-only.
 //! - [`isolate_subprocess_env`] scrubs the host's `GIT_*` from `wt` children but
 //!   passes these two through, so a subprocess inherits the same floor.
 //!
