@@ -3658,7 +3658,10 @@ mod tests {
             .filter(|line| line.starts_with("command line:"))
             .map(|line| line.trim_start_matches("command line:").trim())
             .collect();
-        insta::assert_snapshot!(from_env.join("\n"), @"user.useconfigonly=true");
+        insta::assert_snapshot!(from_env.join("\n"), @r"
+        user.useconfigonly=true
+        rerere.enabled=false
+        ");
 
         // Nothing outside the fixture contributes. Git reports the repo's own
         // config at a path relative to it, so the only two origins a resolved

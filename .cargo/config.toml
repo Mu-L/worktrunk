@@ -33,17 +33,25 @@ GIT_CONFIG_SYSTEM = { value = "/nonexistent/wt/gitconfig", force = true }
 # `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` are git's
 # environment spelling of `-c`, so this applies wherever the deny pair does.
 #
-# Only `useConfigOnly` is here, because it is the only setting that has work to
-# do once the host's config is denied. It stops git *guessing* an identity from
-# the OS username and hostname when none is configured, which is the one way a
-# hermetic suite could still author a commit as the developer. Nothing exercises
-# it — every path sets an identity — so it is a backstop, and the reason to keep
-# it is that without it a future gap goes silent instead of failing.
+# Two settings are here, and both have work to do once the host's config is
+# denied. `user.useConfigOnly` stops git *guessing* an identity from the OS
+# username and hostname when none is configured, which is the one way a
+# hermetic suite could still author a commit as the developer. Nothing
+# exercises it — every path sets an identity — so it is a backstop, kept
+# because without it a future gap goes silent instead of failing.
 #
-# `commit.gpgsign`, `advice.mergeConflict`, `advice.resolveConflict` and
-# `rerere.enabled` were here and are gone: they predate the denial, which
-# already puts git on its own defaults for all four. Disabling the whole set and
-# running 4,611 tests failed nothing but the assertion on this list's contents.
+# `rerere.enabled = false` is set rather than left unset because git turns
+# rerere on by itself whenever `$GIT_DIR/rr-cache` exists. The cached standard
+# fixture under `target/` is built once and copied per test, so a single rebase
+# during its construction leaves an `rr-cache` behind that silently enables
+# rerere for every test copying it — and only on machines whose cache predates
+# the change. Pinning it false makes the suite's rerere state independent of
+# what a fixture happens to carry.
+#
+# `commit.gpgsign`, `advice.mergeConflict` and `advice.resolveConflict` were
+# here and are gone: denial already puts git on its own defaults for the first,
+# and `tests/fixtures/template-repo/gitconfig` carries the other two into the
+# fixtures that need them.
 #
 # That spelling also sets their precedence: `-c` outranks a repository's own
 # config, where a global *file* would yield to it. So a key belongs here only
@@ -57,6 +65,8 @@ GIT_CONFIG_SYSTEM = { value = "/nonexistent/wt/gitconfig", force = true }
 # their commits as `Test User`; without one, `useConfigOnly` fails that commit
 # instead. Tests get their identity from `git_test_env` (harness-built git) and
 # `LOCAL_TEST_CONFIG` (in-process git).
-GIT_CONFIG_COUNT = { value = "1", force = true }
+GIT_CONFIG_COUNT = { value = "2", force = true }
 GIT_CONFIG_KEY_0 = { value = "user.useConfigOnly", force = true }
 GIT_CONFIG_VALUE_0 = { value = "true", force = true }
+GIT_CONFIG_KEY_1 = { value = "rerere.enabled", force = true }
+GIT_CONFIG_VALUE_1 = { value = "false", force = true }
