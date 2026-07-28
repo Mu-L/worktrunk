@@ -293,20 +293,8 @@ fn test_promote_bare_repo_with_worktrees() {
     let worktree_path = temp_dir.path().join("worktree");
     let temp_clone = temp_dir.path().join("temp");
 
-    // Isolated gitconfig, as everywhere else that drives git directly. The
-    // host's config reaches these repos otherwise, and a conditional
-    // `includeIf "gitdir:<home>"` enabling `commit.gpgsign` then fails the
-    // commit below — but only when TMPDIR happens to sit inside the matched
-    // tree, so the suite passes or fails on where the temp dir lives.
-    let git_config_path = temp_dir.path().join("test-gitconfig");
-    fs::write(
-        &git_config_path,
-        "[user]\n\tname = Test User\n\temail = test@example.com\n\
-         [init]\n\tdefaultBranch = main\n",
-    )
-    .unwrap();
     let run_git = |dir: &std::path::Path, args: &[&str]| {
-        let output = configure_git_env(Cmd::new("git"), &git_config_path)
+        let output = configure_git_env(Cmd::new("git"))
             .args(args.iter().copied())
             .current_dir(dir)
             .run()

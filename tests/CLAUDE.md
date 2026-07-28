@@ -172,25 +172,27 @@ reads in production drops `TEST` and keeps `WORKTRUNK_`.
 
 ## Git Config Isolation
 
-**No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. One file carries the whole guarantee: `dev/hermetic-gitconfig`, which `.cargo/config.toml` installs as `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` for every process cargo starts.
+**No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. The guarantee is environment, with no git-config file anywhere in the repo. `.cargo/config.toml` points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist, and supplies the settings the suite needs through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, for every process cargo starts.
 
-That layer is the one that can cover git spawned **in-process**. `TestRepo` exposes a `repo` field of the production `Repository` type, and `Repository::run_command` builds a plain `Cmd::new("git")` — no per-command hook the fixtures could reach, whether the call is test setup or the production code under test. Git reads the two variables and nothing else to find its out-of-repo config, and a variable can only be set before the process starts (`std::env::set_var` is `unsafe`, and the crate forbids `unsafe`), so the runner is the only place it can come from.
+That layer is the one that can cover git spawned **in-process**. `TestRepo` exposes a `repo` field of the production `Repository` type, and `Repository::run_command` builds a plain `Cmd::new("git")` — no per-command hook the fixtures could reach, whether the call is test setup or the production code under test. A variable can only be set before the process starts (`std::env::set_var` is `unsafe`, and the crate forbids `unsafe`), so the runner is the only place it can come from.
 
 Everything else is downstream of that floor, not a second guarantee:
 
-- `configure_git_env` / `configure_git_cmd` — used by `TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()` — override `GIT_CONFIG_GLOBAL` with `dev/test-gitconfig`, which `[include]`s the floor and adds an identity. It is checked in and read-only: the content is identical for every test, so `test_gitconfig_path()` hands out the path rather than writing a copy. Writing one is what costs — a single shared path has every test process racing to write one name, which on Windows means renaming over a file another process holds open, and a copy per process leaks one entry per test.
-- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes these two through, so a subprocess inherits the same floor. `pty_env_vars` points a PTY child at the same file.
+- `git_test_env` — reaching git through `configure_git_env` / `configure_git_cmd` (`TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()`) and a PTY child through `pty_env_vars` — restates the deny pair per command and adds the test identity.
+- `isolate_subprocess_env` scrubs the host's `GIT_*` from `wt` children but passes the whole `GIT_CONFIG_*` family through, so a subprocess inherits the same floor. Dropping the numbered members would leave a child with the denial but none of the settings it was denying *for*.
+- `pty_env_vars` copies that family across by hand, because a PTY child is `env_clear`ed and inherits nothing. `pty_env_vars_carry_the_git_config_floor` pins it: the settings only quiet advice and refuse a guessed identity, so no PTY assertion would notice them going missing.
 
-Two things follow that are easy to get wrong:
+Three things follow that are easy to get wrong:
 
-- **Identity has two homes, and the floor is neither.** A harness-built git reads it from `dev/test-gitconfig`; an in-process git reads it from the fixture repo's local config, which every `TestRepo` constructor writes. The floor carries none because `cargo run -- <cmd>` resolves it too, where `useConfigOnly` fails a developer's commit rather than authoring it as Test User.
+- **`GIT_CONFIG_COUNT` is `-c`, so it outranks a repository's own config**, where a global *file* would yield to it. A key belongs in the floor only when no test needs to override it locally. `init.defaultBranch` is the one that doesn't qualify — `default_branch.rs` sets it in a repo to prove `wt` reads it — so every `git init` in the harness names its branch instead.
+- **Identity is not in the floor.** A harness-built git gets it from `git_test_env`; an in-process git gets it from the fixture repo's local config, which every `TestRepo` constructor writes. The floor carries none because `cargo run -- <cmd>` resolves it too, where `useConfigOnly` fails a developer's commit rather than authoring it as Test User.
 - **Where fixtures live carries no isolation weight.** A conditional `includeIf "gitdir:<home>"` can't reach them wherever they sit, so `test_temp_root()`'s location is a question of ancestor-walk cost alone.
 
 What the hole cost before this: any key in the developer's config applied to fixture repos, so `commit.gpgsign` failed their commits, `core.hooksPath` ran their hooks, and `core.fsmonitor` / `credential.helper` / `filter.*` ran programs of their choosing. A conditional `includeIf` made which of those happened depend on where `$TMPDIR` sat — the suite passed by accident of the temp dir being outside `$HOME`.
 
-The cost of the mechanism is that `cargo run -- <cmd>` in this repo also runs against the hermetic config — no aliases, no credential helper, no identity. Use the installed `wt` for anything that commits.
+The cost of the mechanism is that `cargo run -- <cmd>` in this repo also runs against the floor — no aliases, no credential helper, no identity. Use the installed `wt` for anything that commits.
 
-`GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` are **not** part of this floor: `configure_git_env` pins them per command, so a commit made through `Repository::run_command` still gets the wall clock. Snapshot the author, not the date.
+`GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` are **not** part of this floor: `git_test_env` pins them per command, so a commit made through `Repository::run_command` still gets the wall clock. Snapshot the author, not the date.
 
 ## Config Isolation for In-Process Unit Tests
 

@@ -4,31 +4,55 @@
 [env]
 COLUMNS = "80"
 
-# Deny the developer's git config to every `git` the test suite spawns.
+# Deny the developer's git config to every `git` the test suite spawns, and
+# supply the settings the suite needs in its place — all as environment, with
+# no file on disk.
 #
 # An in-process test drives git through the test process's own environment —
 # `Repository::run_command` builds a plain `Cmd::new("git")`, so there is no
-# per-command hook the fixtures can reach. Git resolves the global and system
-# config from these two variables alone, and a variable can only be set before
+# per-command hook the fixtures can reach. A variable can only be set before
 # the process starts, so this is the one layer that covers in-process git.
-# Everything else is downstream of it: `configure_git_env` overrides
-# `GIT_CONFIG_GLOBAL` with `dev/test-gitconfig`, which includes this file and
-# adds a test identity, and `isolate_subprocess_env` lets both pass through to
-# `wt` children rather than scrubbing them.
+# `configure_git_env` restates the two deny vars per command, and
+# `isolate_subprocess_env` lets every `GIT_CONFIG_*` pass through to `wt`
+# children rather than scrubbing it.
 #
 # Without it the suite reads whatever the developer configured — `commit.gpgsign`
 # fails every fixture commit, `core.hooksPath` runs their hooks, `core.fsmonitor`
 # and `credential.helper` run programs of their choosing — and a conditional
 # `includeIf "gitdir:…"` makes which of those happens depend on where `$TMPDIR`
-# sits. Both slots point at one file because the file is the whole allowance:
-# the only git config outside a repository the suite may read.
+# sits.
 #
-# `force` so an exported `GIT_CONFIG_GLOBAL` can't reinstate the host's config;
-# `relative` resolves against this file's worktree, so each worktree uses its own.
+# The deny pair names a path that does not exist, matching
+# `DEFAULT_ISOLATED_USER_CONFIG`. Git reads a missing config file as an empty
+# one; only an explicit `--global`/`--system` read of it fails, and nothing in
+# `wt` performs one. `force` so an exported value can't reinstate the host's
+# config.
+GIT_CONFIG_GLOBAL = { value = "/nonexistent/wt/gitconfig", force = true }
+GIT_CONFIG_SYSTEM = { value = "/nonexistent/wt/gitconfig", force = true }
+
+# `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` are git's
+# environment spelling of `-c`, so these five apply wherever the deny pair does.
 #
-# The cost is that `cargo run -- <cmd>` also runs against this config rather
-# than the developer's: no aliases, no credential helper, and no identity, so a
-# `cargo run -- merge` that would commit fails instead of writing an author the
-# developer didn't pick. Use the installed `wt` for anything that commits.
-GIT_CONFIG_GLOBAL = { value = "dev/hermetic-gitconfig", relative = true, force = true }
-GIT_CONFIG_SYSTEM = { value = "dev/hermetic-gitconfig", relative = true, force = true }
+# That spelling also sets their precedence: `-c` outranks a repository's own
+# config, where a global *file* would yield to it. So a key belongs here only
+# when no test needs to override it locally — which is why `init.defaultBranch`
+# does not, and every `git init` in the harness names its branch instead:
+# `default_branch.rs` sets that key in a repo to prove `wt` reads it, and an
+# entry here would silently win.
+#
+# There is deliberately no identity. Cargo applies this table to a developer's
+# `cargo run -- <cmd>` as much as to the suite, so a name here would author
+# their commits as `Test User`; without one, `user.useConfigOnly` fails that
+# commit instead. Tests get their identity from `git_test_env` (harness-built
+# git) and `LOCAL_TEST_CONFIG` (in-process git).
+GIT_CONFIG_COUNT = { value = "5", force = true }
+GIT_CONFIG_KEY_0 = { value = "user.useConfigOnly", force = true }
+GIT_CONFIG_VALUE_0 = { value = "true", force = true }
+GIT_CONFIG_KEY_1 = { value = "advice.mergeConflict", force = true }
+GIT_CONFIG_VALUE_1 = { value = "false", force = true }
+GIT_CONFIG_KEY_2 = { value = "advice.resolveConflict", force = true }
+GIT_CONFIG_VALUE_2 = { value = "false", force = true }
+GIT_CONFIG_KEY_3 = { value = "commit.gpgsign", force = true }
+GIT_CONFIG_VALUE_3 = { value = "false", force = true }
+GIT_CONFIG_KEY_4 = { value = "rerere.enabled", force = true }
+GIT_CONFIG_VALUE_4 = { value = "true", force = true }

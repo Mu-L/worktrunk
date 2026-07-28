@@ -26,9 +26,10 @@
 //! ## Environment Isolation
 //!
 //! No `git` the suite runs reads the developer's `~/.gitconfig`. The guarantee
-//! rests on one file, `dev/hermetic-gitconfig`, which
-//! `.cargo/config.toml` installs as `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
-//! for every process cargo starts. That is the only layer that can cover git
+//! is environment, not a file: `.cargo/config.toml` points
+//! `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist
+//! and supplies the settings the suite needs through `GIT_CONFIG_COUNT`, for
+//! every process cargo starts. That is the only layer that can cover git
 //! spawned *in-process*: `Repository::run_command` builds a plain
 //! `Cmd::new("git")`, so a test driving production code has no per-command hook
 //! to reach, and a variable can only be set before the process starts
@@ -36,11 +37,12 @@
 //!
 //! The rest is downstream of it:
 //!
-//! - [`configure_git_env`] / [`configure_git_cmd`] override `GIT_CONFIG_GLOBAL`
-//!   with `dev/test-gitconfig`, which `[include]`s that file and adds the test
-//!   identity. It is checked in and read-only.
+//! - [`git_test_env`] restates the deny pair per command and adds the test
+//!   identity, which the floor deliberately lacks so a developer's `cargo run`
+//!   cannot commit as `Test User`.
 //! - [`isolate_subprocess_env`] scrubs the host's `GIT_*` from `wt` children but
-//!   passes these two through, so a subprocess inherits the same floor.
+//!   passes the whole `GIT_CONFIG_*` family through, so a subprocess inherits
+//!   the same floor.
 //!
 //! On top of that isolation the helpers pin commit timestamps, locale, and
 //! terminal width, all per command — no test mutates process-global state.
@@ -163,7 +165,7 @@ fn claim_template(parent: &Path, dir: &Path, build: impl FnOnce(&Path)) {
 /// back-pointing remote), and three feature worktrees with one commit each.
 fn build_standard_fixture(root: &Path) {
     let git = |dir: &Path| {
-        configure_git_env(Cmd::new("git"), test_gitconfig_path())
+        configure_git_env(Cmd::new("git"))
             .env("GIT_AUTHOR_DATE", STANDARD_FIXTURE_COMMIT_DATE)
             .env("GIT_COMMITTER_DATE", STANDARD_FIXTURE_COMMIT_DATE)
             .current_dir(dir)
@@ -284,21 +286,13 @@ fn copy_standard_fixture(dest: &Path) -> FixtureWorktrees {
     FixtureWorktrees { worktrees, remote }
 }
 
-/// The gitconfig that harness-built commands point `GIT_CONFIG_GLOBAL` at
-/// (see [`configure_git_env`]). Settings that must also hold for git spawned
-/// in-process go in `LOCAL_TEST_CONFIG` instead.
+/// The identity every test commit is authored and committed under.
 ///
-/// A checked-in file rather than one written at runtime. Its content is the
-/// same for every test in every process, so there is nothing to generate — and
-/// generating it is what a shared path makes expensive: a single copy has every
-/// test process racing to write one name, which on Windows means renaming over
-/// a file another process holds open, while a copy per process leaks one entry
-/// per test under nextest. `dev/test-gitconfig` includes `dev/hermetic-gitconfig`
-/// rather than restating it, so this file cannot drift from the floor it
-/// overrides.
-pub fn test_gitconfig_path() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/dev/test-gitconfig"))
-}
+/// Reaches a harness-built `git` through [`git_test_env`] and an in-process one
+/// through [`LOCAL_TEST_CONFIG`], which repeats these two values because a
+/// config file cannot interpolate a constant.
+const TEST_IDENTITY_NAME: &str = "Test User";
+const TEST_IDENTITY_EMAIL: &str = "test@example.com";
 
 /// Settings written into every test repo's own config by
 /// [`write_local_test_config`].
@@ -310,11 +304,10 @@ pub fn test_gitconfig_path() -> &'static Path {
 /// repo's own config is the one layer such a command still reads, so whatever
 /// must hold for it lives here.
 ///
-/// What it does *not* have to carry is host-config denial. `.cargo/config.toml`
-/// points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `dev/hermetic-gitconfig`
-/// for every process cargo starts, so an in-process git resolves that file
-/// rather than the developer's — see the Git Config Isolation section of
-/// `tests/CLAUDE.md`.
+/// What it does *not* have to carry is host-config denial or the floor's
+/// settings. `.cargo/config.toml` supplies both as environment for every
+/// process cargo starts, so an in-process git resolves those rather than the
+/// developer's — see the Git Config Isolation section of `tests/CLAUDE.md`.
 ///
 /// `protocol.allow = never` with a `file` exception is the config spelling of
 /// `GIT_ALLOW_PROTOCOL=file` (see [`GIT_ALLOWED_PROTOCOLS`] for why the suite
@@ -495,11 +488,12 @@ pub fn pty_env_vars(paths: TestEnvPaths<'_>) -> Vec<(String, String)> {
         .chain(PTY_TEST_ENV_VARS)
         .map(|&(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    vars.extend(
-        git_test_env(test_gitconfig_path())
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v)),
-    );
+    // A PTY child is `env_clear`ed, so the `GIT_CONFIG_*` floor that
+    // `.cargo/config.toml` sets for this process reaches it only if carried
+    // across by hand — every other transport inherits it. Ahead of
+    // `git_test_env` so its deny pair still wins.
+    vars.extend(std::env::vars().filter(|(key, _)| key.starts_with(HERMETIC_GIT_CONFIG_PREFIX)));
+    vars.extend(git_test_env().into_iter().map(|(k, v)| (k.to_string(), v)));
 
     vars.extend(
         [
@@ -585,20 +579,22 @@ fn default_llvm_profile_file_with(inherited: Option<std::ffi::OsString>) -> std:
     dir.join("cov-%m_%p.profraw").into_os_string()
 }
 
-/// The two `GIT_*` variables [`isolate_subprocess_env`] passes through instead
-/// of scrubbing.
+/// The `GIT_*` prefix [`isolate_subprocess_env`] passes through instead of
+/// scrubbing.
 ///
-/// They name the suite's hermetic git config (`.cargo/config.toml` sets both
-/// for every process cargo starts), so scrubbing them would hand the child back
-/// the developer's `~/.gitconfig` — the opposite of what the scrub is for.
-/// Callers that own a `TestRepo` overwrite `GIT_CONFIG_GLOBAL` with their own
-/// copy afterwards via [`configure_git_cmd`]; the rest inherit the floor.
-const HERMETIC_GIT_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"];
+/// The whole `GIT_CONFIG_*` family carries the suite's hermetic floor — the
+/// deny pair plus `GIT_CONFIG_COUNT` and its numbered keys and values, all set
+/// by `.cargo/config.toml` for every process cargo starts. Scrubbing any of
+/// them would hand the child back the developer's `~/.gitconfig`, the opposite
+/// of what the scrub is for. Passing the family by prefix rather than by name
+/// costs nothing: cargo `force`s every member it sets, so a host-exported one
+/// has already been overridden before a child sees it.
+const HERMETIC_GIT_CONFIG_PREFIX: &str = "GIT_CONFIG_";
 
 /// Prepare a subprocess to run with a clean wt environment.
 ///
 /// Strips every `GIT_*` and `WORKTRUNK_*` from the parent env — bar
-/// `HERMETIC_GIT_CONFIG_VARS` — plus
+/// `HERMETIC_GIT_CONFIG_PREFIX` — plus
 /// `NO_COLOR` / `FORCE_HYPERLINK` / `SHELL` / `PSModulePath`, then points the three
 /// `WORKTRUNK_*_PATH` env vars at known locations:
 ///
@@ -635,7 +631,7 @@ where
 {
     for key in env_keys {
         if (key.starts_with("GIT_") || key.starts_with("WORKTRUNK_"))
-            && !HERMETIC_GIT_CONFIG_VARS.contains(&key.as_str())
+            && !key.starts_with(HERMETIC_GIT_CONFIG_PREFIX)
         {
             cmd.env_remove(&key);
         }
@@ -695,8 +691,8 @@ pub fn scrub_git_path_vars(cmd: &mut Command) {
 /// rooted directly in the shared dir pays for everything the machine has put
 /// there; rooted here it pays for the handful of fixtures currently alive.
 ///
-/// Where that root sits carries no isolation weight: the fixtures resolve git
-/// config from `dev/hermetic-gitconfig` wherever they live, so a conditional
+/// Where that root sits carries no isolation weight: the fixtures read no
+/// git config outside themselves wherever they live, so a conditional
 /// `includeIf "gitdir:<home>"` in the developer's config can't reach them.
 /// Only the ancestor-walk cost above argues for one location over another.
 ///
@@ -883,17 +879,27 @@ pub fn configure_cli_command(cmd: &mut Command) {
     // callers get the same defense; nothing extra needed here.
 }
 
-/// The environment for a directly-spawned test `git`: isolated config,
-/// deterministic timestamps and locale, no terminal prompts, no network
-/// transports (`GIT_ALLOWED_PROTOCOLS`).
+/// The environment for a directly-spawned test `git`: no config files,
+/// deterministic identity, timestamps and locale, no terminal prompts, no
+/// network transports (`GIT_ALLOWED_PROTOCOLS`).
 ///
 /// Single home for these settings — [`configure_git_cmd`] (Command),
 /// [`configure_git_env`] (`Cmd`), and [`pty_env_vars`] (PTY) all
 /// consume it, so the three spellings cannot drift.
-pub fn git_test_env(git_config_path: &Path) -> [(&'static str, String); 9] {
+///
+/// The identity is here rather than in the `.cargo/config.toml` floor because
+/// that floor also applies to a developer's `cargo run -- <cmd>`, where a name
+/// would author their commits as `Test User`. A harness-built `git` needs one
+/// because it commits into repos it has just created, before
+/// `LOCAL_TEST_CONFIG` reaches their local config.
+pub fn git_test_env() -> [(&'static str, String); 13] {
     [
-        ("GIT_CONFIG_GLOBAL", git_config_path.display().to_string()),
+        ("GIT_CONFIG_GLOBAL", NULL_DEVICE.to_string()),
         ("GIT_CONFIG_SYSTEM", NULL_DEVICE.to_string()),
+        ("GIT_AUTHOR_NAME", TEST_IDENTITY_NAME.to_string()),
+        ("GIT_AUTHOR_EMAIL", TEST_IDENTITY_EMAIL.to_string()),
+        ("GIT_COMMITTER_NAME", TEST_IDENTITY_NAME.to_string()),
+        ("GIT_COMMITTER_EMAIL", TEST_IDENTITY_EMAIL.to_string()),
         ("GIT_AUTHOR_DATE", "2025-01-01T00:00:00Z".to_string()),
         ("GIT_COMMITTER_DATE", "2025-01-01T00:00:00Z".to_string()),
         ("LC_ALL", "C".to_string()),
@@ -907,17 +913,13 @@ pub fn git_test_env(git_config_path: &Path) -> [(&'static str, String); 9] {
 /// Configure a git command with isolated environment for testing.
 ///
 /// Applies [`git_test_env`].
-///
-/// # Arguments
-/// * `cmd` - The git Command to configure
-/// * `git_config_path` - Path to git config file (use `/dev/null` or `NULL_DEVICE` for none)
-pub fn configure_git_cmd(cmd: &mut Command, git_config_path: &Path) {
+pub fn configure_git_cmd(cmd: &mut Command) {
     // Defensive: every existing caller is downstream of `configure_cli_command`
     // (which already stripped these via `isolate_subprocess_env`), but a future
     // test that spawns `git` from an unprepared parent shouldn't be vulnerable
     // to an inherited relative `GIT_DIR` redirecting discovery.
     scrub_git_path_vars(cmd);
-    for (key, value) in git_test_env(git_config_path) {
+    for (key, value) in git_test_env() {
         cmd.env(key, value);
     }
 }
@@ -926,12 +928,12 @@ pub fn configure_git_cmd(cmd: &mut Command, git_config_path: &Path) {
 ///
 /// This is the `Cmd` equivalent of [`configure_git_cmd`]. Use this when building
 /// git commands via the builder pattern (`Cmd::new("git")`).
-pub fn configure_git_env(cmd: Cmd, git_config_path: &Path) -> Cmd {
+pub fn configure_git_env(cmd: Cmd) -> Cmd {
     // Defensive `GIT_*` path-var strip — see `configure_git_cmd` for rationale.
     let cmd = INHERITED_GIT_PATH_VARS
         .iter()
         .fold(cmd, |acc, var| acc.env_remove(var));
-    git_test_env(git_config_path)
+    git_test_env()
         .into_iter()
         .fold(cmd, |acc, (key, value)| acc.env(key, value))
 }
@@ -941,17 +943,14 @@ pub fn configure_git_env(cmd: Cmd, git_config_path: &Path) -> Cmd {
 /// Provides `configure_git_cmd()` (for `Command`), `git_command()` (returns `Cmd`),
 /// and `run_git_in()` with consistent environment isolation.
 pub trait TestRepoBase {
-    /// Path to the git config file for this test.
-    fn git_config_path(&self) -> &Path;
-
     /// Configure a git command with isolated environment.
     fn configure_git_cmd(&self, cmd: &mut Command) {
-        configure_git_cmd(cmd, self.git_config_path());
+        configure_git_cmd(cmd);
     }
 
     /// Create a git command for the given directory.
     fn git_command(&self, dir: &Path) -> Cmd {
-        configure_git_env(Cmd::new("git"), self.git_config_path()).current_dir(dir)
+        configure_git_env(Cmd::new("git")).current_dir(dir)
     }
 
     /// Run a git command in a specific directory, panicking on failure.
@@ -1123,8 +1122,8 @@ pub fn check_git_status(output: &std::process::Output, cmd_desc: &str) {
 }
 
 /// The isolated per-test config files a [`TestRepo`] carries, both rooted in
-/// one temp directory. (The test gitconfig is not here: its content is
-/// per-process constant, so it lives at [`test_gitconfig_path`].)
+/// one temp directory. (There is no git config among them: the suite's git
+/// isolation is environment, carrying no per-test state.)
 struct TestConfigPaths {
     wt: PathBuf,
     approvals: PathBuf,
@@ -1196,7 +1195,7 @@ impl TestRepo {
     /// Bare repos have no working tree — useful for testing error paths
     /// and bare-repo-specific behavior (e.g., hint fallback to `wt list`).
     pub fn bare() -> Self {
-        Self::init_repo(&["init", "--bare"])
+        Self::init_repo(&["init", "--bare", "-b", "main"])
     }
 
     /// Path to the repository working directory.
@@ -1256,7 +1255,7 @@ impl TestRepo {
     /// project/.git` pattern where the bare dir sits inside a project
     /// directory the test owns.
     pub fn bare_at(path: &Path) -> Self {
-        Self::at_with(path, &["init", "--bare", "--quiet"])
+        Self::at_with(path, &["init", "--bare", "-b", "main", "--quiet"])
     }
 
     /// Shared initializer for [`at()`](Self::at) and [`bare_at()`](Self::bare_at):
@@ -1267,7 +1266,7 @@ impl TestRepo {
         let config_dir = test_tempdir();
         let paths = TestConfigPaths::in_dir(config_dir.path());
 
-        configure_git_env(Cmd::new("git"), test_gitconfig_path())
+        configure_git_env(Cmd::new("git"))
             .args(git_args.iter().copied())
             .current_dir(path)
             .run()
@@ -1281,7 +1280,7 @@ impl TestRepo {
     /// Use this for tests that specifically need to test behavior in an
     /// uninitialized repo. Most tests should use `new()` instead.
     pub fn empty() -> Self {
-        Self::init_repo(&["init", "-q"])
+        Self::init_repo(&["init", "-q", "-b", "main"])
     }
 
     /// Shared initializer for `new()`, `bare()`, and `empty()`: makes a tempdir
@@ -1293,7 +1292,7 @@ impl TestRepo {
 
         let paths = TestConfigPaths::in_dir(temp_dir.path());
 
-        configure_git_env(Cmd::new("git"), test_gitconfig_path())
+        configure_git_env(Cmd::new("git"))
             .args(git_args.iter().copied())
             .current_dir(&root)
             .run()
@@ -1336,7 +1335,7 @@ impl TestRepo {
     /// This sets environment variables only for the specific command,
     /// ensuring thread-safety and test isolation.
     pub fn configure_git_cmd(&self, cmd: &mut Command) {
-        configure_git_cmd(cmd, test_gitconfig_path());
+        configure_git_cmd(cmd);
     }
 
     /// This repo's environment for a PTY-spawned wt subprocess.
@@ -1381,7 +1380,7 @@ impl TestRepo {
     /// ```
     #[must_use]
     pub fn git_command(&self) -> Cmd {
-        configure_git_env(Cmd::new("git"), test_gitconfig_path()).current_dir(&self.root)
+        configure_git_env(Cmd::new("git")).current_dir(&self.root)
     }
 
     /// Run a git command in the repo root, panicking on failure.
@@ -2767,11 +2766,7 @@ impl TestRepo {
     }
 }
 
-impl TestRepoBase for TestRepo {
-    fn git_config_path(&self) -> &Path {
-        test_gitconfig_path()
-    }
-}
+impl TestRepoBase for TestRepo {}
 
 /// Helper to create a bare repository test setup.
 ///
@@ -2873,11 +2868,7 @@ impl BareRepoTest {
     }
 }
 
-impl TestRepoBase for BareRepoTest {
-    fn git_config_path(&self) -> &Path {
-        test_gitconfig_path()
-    }
-}
+impl TestRepoBase for BareRepoTest {}
 
 /// Create a configured Command for snapshot testing
 ///
@@ -3347,7 +3338,7 @@ mod tests {
         // named a protocol list would silently keep the fixture clone offline,
         // and the daily benchmark run is the only thing that would notice.
         let mut opted_out = Command::new("git");
-        configure_git_cmd(&mut opted_out, Path::new(NULL_DEVICE));
+        configure_git_cmd(&mut opted_out);
         allow_network_transports(&mut opted_out);
         assert!(
             opted_out
@@ -3453,7 +3444,7 @@ mod tests {
     fn test_standard_fixture_template_reproduces_pinned_shas() {
         let repo = standard_fixture_template().join("repo");
         let rev_parse = |rev: &str| {
-            let output = configure_git_env(Cmd::new("git"), test_gitconfig_path())
+            let output = configure_git_env(Cmd::new("git"))
                 .args(["rev-parse", rev])
                 .current_dir(&repo)
                 .run()
@@ -3521,6 +3512,39 @@ mod tests {
         assert!(warnings.is_empty() || !warnings[0].contains("loses"));
     }
 
+    /// A PTY child is the one transport that inherits nothing, so the floor
+    /// reaches it only because [`pty_env_vars`] copies it across. Losing that
+    /// copy would leave those children denying the host's config but carrying
+    /// none of the settings the denial is *for* — and no PTY assertion would
+    /// notice, since the settings only quiet advice and refuse a guessed
+    /// identity.
+    #[test]
+    fn pty_env_vars_carry_the_git_config_floor() {
+        let dir = Path::new("/tmp");
+        let vars = pty_env_vars(TestEnvPaths {
+            home: dir,
+            wt_config: dir,
+            approvals: dir,
+        });
+        let keys: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
+
+        // `.cargo/config.toml` is what puts these in this process's env, so
+        // this also fails if the floor stops being applied to the suite at all.
+        assert!(
+            keys.contains(&"GIT_CONFIG_COUNT"),
+            "PTY children lost the GIT_CONFIG_* floor: {keys:?}"
+        );
+        let count: usize = std::env::var("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
+        for i in 0..count {
+            for var in [
+                format!("GIT_CONFIG_KEY_{i}"),
+                format!("GIT_CONFIG_VALUE_{i}"),
+            ] {
+                assert!(keys.contains(&var.as_str()), "{var} missing: {keys:?}");
+            }
+        }
+    }
+
     #[test]
     fn isolate_subprocess_env_scrubs_git_and_worktrunk_keys() {
         let mut cmd = Command::new("true");
@@ -3529,6 +3553,9 @@ mod tests {
             "GIT_AUTHOR_DATE".to_string(),
             "GIT_CONFIG_GLOBAL".to_string(),
             "GIT_CONFIG_SYSTEM".to_string(),
+            "GIT_CONFIG_COUNT".to_string(),
+            "GIT_CONFIG_KEY_0".to_string(),
+            "GIT_CONFIG_VALUE_0".to_string(),
             "WORKTRUNK_CONFIG_PATH".to_string(),
             "WORKTRUNK_HISTORY".to_string(),
             "PATH".to_string(),
@@ -3559,10 +3586,18 @@ mod tests {
         // Not scrubbed: vars that don't match either prefix.
         assert!(!removed.contains_key("PATH"));
         assert!(!removed.contains_key("HOME"));
-        // Nor the two that name the hermetic git config — the child inherits
-        // the suite's floor instead of falling back to `~/.gitconfig`.
-        for var in HERMETIC_GIT_CONFIG_VARS {
-            assert!(!removed.contains_key(*var), "{var} should pass through");
+        // Nor any of the `GIT_CONFIG_*` family that carries the hermetic floor —
+        // the child inherits it instead of falling back to `~/.gitconfig`. The
+        // numbered members matter as much as the deny pair: drop them and the
+        // child keeps the denial but loses every setting it was denying *for*.
+        for var in [
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+        ] {
+            assert!(!removed.contains_key(var), "{var} should pass through");
         }
         // No underscore — prefix check requires `GIT_`/`WORKTRUNK_`.
         assert!(!removed.contains_key("GIT"));
@@ -3603,38 +3638,51 @@ mod tests {
     ///
     /// `Repository::run_command` builds a plain `Cmd::new("git")` with no
     /// `GIT_CONFIG_*` of its own, so what it resolves is whatever the test
-    /// process inherited — which `.cargo/config.toml` pins to
-    /// `dev/hermetic-gitconfig`. Listing that config through the production
-    /// API fails loudly if the layer goes missing, instead of leaving the suite
-    /// to read the developer's `~/.gitconfig` and pass or fail on its contents.
+    /// process inherited — which `.cargo/config.toml` pins to the environment
+    /// floor. Resolving it through the production API fails loudly if the layer
+    /// goes missing, instead of leaving the suite to read the developer's
+    /// `~/.gitconfig` and pass or fail on its contents.
     #[test]
     fn in_process_git_reads_only_the_hermetic_config() {
         let repo = TestRepo::with_initial_commit();
 
-        let global = repo
+        // Every setting resolves, and every one of them comes from the
+        // environment rather than a file on the host.
+        let floor = repo
             .repo
-            .run_command(&["config", "--global", "--list"])
+            .run_command(&["config", "--list", "--show-origin"])
             .unwrap();
-        let system = repo
-            .repo
-            .run_command(&["config", "--system", "--list"])
-            .unwrap();
-        // Both slots name the same file, so there is no way to deny one and
-        // leave the other reading `/etc/gitconfig`.
-        assert_eq!(system, global);
-        insta::assert_snapshot!(global, @r"
+        let from_env: Vec<&str> = floor
+            .lines()
+            .filter(|line| line.starts_with("command line:"))
+            .map(|line| line.trim_start_matches("command line:").trim())
+            .collect();
+        insta::assert_snapshot!(from_env.join("\n"), @r"
         user.useconfigonly=true
         advice.mergeconflict=false
         advice.resolveconflict=false
-        init.defaultbranch=main
         commit.gpgsign=false
         rerere.enabled=true
         ");
 
+        // Nothing outside the fixture contributes. Git reports the repo's own
+        // config at a path relative to it, so the only two origins a resolved
+        // setting may carry are the environment floor above and `.git/config`;
+        // a host `~/.gitconfig` reaching this git would name a third.
+        let outside: Vec<&str> = floor
+            .lines()
+            .filter(|line| !line.starts_with("command line:"))
+            .filter(|line| !line.starts_with("file:.git/config\t"))
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "config resolved from outside the fixture: {outside:#?}"
+        );
+
         // Identity comes from the fixture's own local config, so a commit made
         // through the production API is authored the same way on every machine
-        // — and `useConfigOnly` in the hermetic config means a fixture that
-        // forgot one errors rather than borrowing the host's username.
+        // — and `useConfigOnly` in the floor means a fixture that forgot one
+        // errors rather than borrowing the host's username.
         std::fs::write(repo.path().join("second.txt"), "second").unwrap();
         repo.repo.run_command(&["add", "second.txt"]).unwrap();
         repo.repo.run_command(&["commit", "-m", "second"]).unwrap();

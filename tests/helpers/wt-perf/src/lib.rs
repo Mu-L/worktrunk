@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use tempfile::TempDir;
-use worktrunk::testing::{NULL_DEVICE, allow_network_transports, configure_git_cmd};
+use worktrunk::testing::{allow_network_transports, configure_git_cmd};
 
 /// Lazy-initialized rust repo path.
 static RUST_REPO: OnceLock<PathBuf> = OnceLock::new();
@@ -160,7 +160,7 @@ pub fn parse_pair(config: &str, prefix: &str) -> Option<(usize, usize)> {
 /// fixture clone re-permits them via [`allow_network_transports`].
 fn git_command() -> Command {
     let mut cmd = Command::new("git");
-    configure_git_cmd(&mut cmd, Path::new(NULL_DEVICE));
+    configure_git_cmd(&mut cmd);
     cmd
 }
 
