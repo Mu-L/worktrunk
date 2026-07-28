@@ -27,6 +27,9 @@
 //   cargo bench --bench list warm                    # Warm-cache variants (every group's warm rows)
 //   cargo bench --bench list skeleton/warm           # Skeleton group, warm only
 
+// The pre-main hermetic env floor — see tests/helpers/test-env.
+use wt_test_env as _;
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::path::{Path, PathBuf};
 use std::process::Command;

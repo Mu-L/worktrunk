@@ -12,6 +12,11 @@ use worktrunk::styling::{
 
 use commands::hooks::HookAnnouncer;
 
+// The pre-main hermetic env floor for this binary's unit tests — see
+// tests/helpers/test-env and the matching line in lib.rs.
+#[cfg(test)]
+use wt_test_env as _;
+
 mod cli;
 mod commands;
 mod completion;

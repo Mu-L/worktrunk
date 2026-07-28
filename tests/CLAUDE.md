@@ -22,7 +22,7 @@ A target-filtered run (`--lib`, `--test integration`, …) on a fresh `target/` 
 
 Five runners execute this suite — `cargo test`, `cargo nextest run`, `cargo llvm-cov nextest`, `cargo bench`, and the Nix `worktrunk-tests` derivation — and CI uses several of them on the same commit. **A test's result must not depend on which one started it.**
 
-So `.config/nextest.toml` carries no setting that changes what a test observes: no `[env]`, and no setup script exporting through `$NEXTEST_ENV`. Anything load-bearing goes where every runner sees it — `.cargo/config.toml` for environment (see Git Config Isolation), the fixture itself for behavior.
+So `.config/nextest.toml` carries no setting that changes what a test observes: no `[env]`, and no setup script exporting through `$NEXTEST_ENV`. Anything load-bearing goes where every runner sees it — the test binary itself for environment (the `wt-test-env` floor, see Git Config Isolation), the fixture for behavior.
 
 A nextest-only knob doesn't fail loudly when another runner misses it. It yields a *different result*, and the runner that disagrees is typically `cargo llvm-cov` — whose numbers gate a merge, and whose disagreement therefore reads as a coverage regression rather than as missing configuration.
 
@@ -172,9 +172,11 @@ reads in production drops `TEST` and keeps `WORKTRUNK_`.
 
 ## Git Config Isolation
 
-**No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. The guarantee is environment, with no git-config file anywhere in the repo. `.cargo/config.toml` points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist, for every process cargo starts.
+**No `git` the suite runs reads the developer's `~/.gitconfig`**, whatever the test drives it through and wherever the fixture lives. The guarantee is environment, with no git-config file anywhere in the repo. A pre-`main` constructor in `wt-test-env` (`tests/helpers/test-env`) points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist, in every binary that links it — which every test target does, with one `use wt_test_env as _;` in its crate root.
 
-**It has to be the runner, not a fixture.** Every other test variable is set on a *child*: `git_test_env` on a git command, `configure_cli_command` on a `wt` subprocess. In-process git is not a child the test configures. `TestRepo` exposes a `repo` field of the production `Repository` type, and `Repository::run_command` builds a plain `Cmd::new("git")`, so what it reads is the test process's own environment, whether the call is test setup or the code under test. A test cannot set that for itself — `std::env::set_var` is `unsafe`, the crate forbids `unsafe`, and under `cargo test` the tests sharing that process run in parallel threads — so the variable can only come from before the process started.
+**It has to be before `main`, not per-test.** Every other test variable is set on a *child*: `git_test_env` on a git command, `configure_cli_command` on a `wt` subprocess. In-process git is not a child the test configures. `TestRepo` exposes a `repo` field of the production `Repository` type, and `Repository::run_command` builds a plain `Cmd::new("git")`, so what it reads is the test process's own environment, whether the call is test setup or the code under test. A test cannot set that for itself — under `cargo test` the tests sharing the process run in parallel threads, and `std::env::set_var` beside a thread that spawns a process (which reads `environ`) is the race that makes it `unsafe`. Before `main` the process has exactly one thread, so a linker constructor is the one place the write is sound.
+
+**In the binary, not the runner.** The floor could also live in cargo's `[env]` (`.cargo/config.toml`), and once did. Carrying it in the binary is strictly stronger: `cargo test`, nextest, `cargo llvm-cov`, `cargo bench`, an IDE, a debugger, and a directly executed `target/debug/deps/integration-*` all agree by construction, where a runner-level floor covers only processes cargo itself starts — and taxes `cargo run`, which should see the developer's real config and identity. The price is that each new test or bench target must carry the one-line link; `assert_hermetic_floor` in the fixture constructors turns a forgotten line into an immediate, self-explaining failure rather than a suite silently running against the host config.
 
 Everything else is downstream of that floor, not a second guarantee:
 
@@ -189,12 +191,12 @@ Everything else is downstream of that floor, not a second guarantee:
 Three things follow that are easy to get wrong:
 
 - **`GIT_CONFIG_COUNT` is `-c`, so it outranks a repository's own config**, where a global *file* would yield to it. A key belongs in the floor only when no test needs to override it locally. `init.defaultBranch` is the one that doesn't qualify — `default_branch.rs` sets it in a repo to prove `wt` reads it — so every `git init` in the harness names its branch instead.
-- **Identity is not in the floor.** A harness-built git gets it from `git_test_env`; an in-process git gets it from the fixture repo's local config, which every `TestRepo` constructor writes. The floor carries none because `cargo run -- <cmd>` resolves it too, where `useConfigOnly` fails a developer's commit rather than authoring it as Test User.
+- **Identity is not in the floor.** A harness-built git gets it from `git_test_env`; an in-process git gets it from the fixture repo's local config, which every `TestRepo` constructor writes. The floor carries only what must exist process-wide before `main` — denial and the two `-c` settings; identity has those per-command homes already, and a copy in the floor could only drift from them, with `useConfigOnly` failing loudly if a path misses both.
 - **Where fixtures live carries no isolation weight.** A conditional `includeIf "gitdir:<home>"` can't reach them wherever they sit, so `test_temp_root()`'s location is a question of ancestor-walk cost alone.
 
 What the hole cost before this: any key in the developer's config applied to fixture repos, so `commit.gpgsign` failed their commits, `core.hooksPath` ran their hooks, and `core.fsmonitor` / `credential.helper` / `filter.*` ran programs of their choosing. A conditional `includeIf` made which of those happened depend on where `$TMPDIR` sat — the suite passed by accident of the temp dir being outside `$HOME`.
 
-The cost of the mechanism is that `cargo run -- <cmd>` in this repo also runs against the floor — no aliases, no credential helper, no identity. Use the installed `wt` for anything that commits.
+`cargo run -- <cmd>` is untouched: the floor lives only in binaries that link `wt-test-env`, so a developer's own invocations keep their aliases, credential helper, and identity.
 
 `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` are **not** part of this floor: `git_test_env` pins them per command, so a commit made through `Repository::run_command` still gets the wall clock. Snapshot the author, not the date.
 
@@ -239,7 +241,7 @@ Git needs the same care, for a narrower reason. An in-process
 `Repository::run_command()` spawns git with the test process's environment, so
 none of `configure_git_env`'s per-command variables apply — no
 `GIT_ALLOW_PROTOCOL`, no per-test `GIT_CONFIG_GLOBAL`. Host *config* is not
-among the gaps: the `.cargo/config.toml` floor above already denies it. The
+among the gaps: the `wt-test-env` floor above already denies it. The
 repo's own config is the one layer such a command still reads, so every
 `TestRepo` constructor appends `LOCAL_TEST_CONFIG` (identity, `commit.gpgsign`,
 and the `protocol.allow` transport deny) to it. The identity is required rather
