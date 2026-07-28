@@ -11,6 +11,7 @@ info:
     CLAUDE_CONFIG_DIR: "[TEST_CLAUDE_CONFIG]"
     CLICOLOR_FORCE: "1"
     COLUMNS: "500"
+    GIT_ALLOW_PROTOCOL: file
     GIT_AUTHOR_DATE: "2025-01-01T00:00:00Z"
     GIT_COMMITTER_DATE: "2025-01-01T00:00:00Z"
     GIT_CONFIG_GLOBAL: "[TEST_GIT_CONFIG]"
@@ -52,4 +53,4 @@ exit_code: 0
 [33m▲[39m [33mBranch [1mfeature[22m is checked out in 2 worktrees; wt uses the first:[39m
 [107m [0m _REPO_.feature
 [107m [0m _REPO_.feature-dup
-[2m↳[22m [2mTo drop a duplicate, run [4mgit worktree remove _REPO_.feature-dup[24m[22m
+[2m↳[22m [2mTo drop a duplicate, run [4mwt remove _REPO_.feature-dup[24m[22m
