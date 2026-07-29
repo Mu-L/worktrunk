@@ -18,21 +18,10 @@ tasks:
     # The `perf` nextest profile lowers slow-timeout to 1s so every test above
     # that prints with its duration. tests/CLAUDE.md → Profiling the Suite
     # covers how to read the numbers.
-    vars:
-      # A fresh TMPDIR, so whatever survives the run is a leak the suite owns.
-      # Rooted at short /tmp rather than the deep default $TMPDIR, under which
-      # a fixture's unix socket path outgrows sun_path — the byte budget is in
-      # tests/CLAUDE.md → Profiling the Suite.
-      RUN_TMP:
-        sh: mktemp -d /tmp/wt-profile.XXXXXX
     cmds:
       # Build first so the measurement covers the test run alone.
       - cargo nextest run --no-run --features shell-integration-tests
-      - defer: rm -rf {{.RUN_TMP}}
-      - TMPDIR={{.RUN_TMP}} /usr/bin/time cargo nextest run --profile perf --features shell-integration-tests {{.CLI_ARGS}}
-      # Fixtures nest under `wt/` (test_temp_root), so look a level in. Only
-      # `wt/isolated-cwd` and `wt-test-profraw` are expected to survive.
-      - echo "temp entries surviving the run (each one is a leak):"; find {{.RUN_TMP}} -mindepth 1 -maxdepth 2 | sed "s|{{.RUN_TMP}}|  |"
+      - /usr/bin/time cargo nextest run --profile perf --features shell-integration-tests {{.CLI_ARGS}}
       - echo "per-test timings in target/nextest/perf/junit.xml"
 
   setup-web:
