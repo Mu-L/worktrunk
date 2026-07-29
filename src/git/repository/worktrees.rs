@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
+use anyhow::Context as _;
 use color_print::cformat;
 use dunce::canonicalize;
 
@@ -116,13 +117,44 @@ impl Repository {
             .map(|wt| (wt.path.clone(), wt.branch.clone())))
     }
 
-    /// Prune worktree entries whose directories no longer exist.
+    /// Unregister the one worktree at `path`, whose directory is already gone.
     ///
-    /// Git tracks worktrees in `.git/worktrees/`. If a worktree directory is deleted
-    /// externally (e.g., `rm -rf`), this method runs `git worktree prune` to clean
-    /// up the entries.
-    pub fn prune_worktrees(&self) -> anyhow::Result<()> {
-        self.run_command(&["worktree", "prune"])?;
+    /// Git tracks worktrees in `.git/worktrees/<id>/`. When a worktree's
+    /// directory disappears — deleted externally, or renamed into the trash by
+    /// [`stage_worktree_removal`](crate::git::remove::stage_worktree_removal) —
+    /// that admin dir is stale and has to go. `git worktree remove` skips its
+    /// clean check when the directory is missing and deletes just that entry,
+    /// so it is the scoped spelling of the cleanup.
+    ///
+    /// # Why not `git worktree prune`
+    ///
+    /// `git worktree prune` takes no path filter: it walks *every* entry and
+    /// unregisters each one whose directory it cannot find at that instant. A
+    /// worktree that is merely absent right now — an unmounted volume, a
+    /// dropped network mount, a half-finished `mv` — is indistinguishable from
+    /// a deleted one, so removing worktree A would also unregister bystander
+    /// B. B's committed work survives (refs and objects are shared) and its
+    /// files stay on disk, but its admin dir does not: the index, `ORIG_HEAD`,
+    /// the per-worktree reflog, `refs/worktree/*` and `refs/bisect/*`, and any
+    /// in-progress rebase or merge all go with it. `git worktree repair`
+    /// cannot rebuild them — it relinks an admin dir, it does not recreate
+    /// one. Naming the target keeps a removal's blast radius equal to its
+    /// intent.
+    ///
+    /// # Locked worktrees
+    ///
+    /// A repo-wide prune silently skips a locked entry; `git worktree remove`
+    /// fails on one instead. Every call site has already established the target
+    /// is unlocked, by a different route each: `prepare_worktree_removal`
+    /// returns `WorktreeLocked` at the top of its path/current arm and rejects
+    /// a locked worktree before staging one for removal, and prune's
+    /// `gather_check_items` never selects one as a candidate.
+    pub fn prune_worktree_entry(&self, path: &Path) -> anyhow::Result<()> {
+        // Every caller's path came from `list_worktrees`, which parses git's
+        // porcelain as UTF-8, so this only fires if that edge ever stops
+        // guaranteeing it — a bare `?` rather than a rendered path.
+        let path_str = path.to_str().context("worktree path is not valid UTF-8")?;
+        self.run_command(&["worktree", "remove", path_str])?;
         Ok(())
     }
 

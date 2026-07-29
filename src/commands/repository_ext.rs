@@ -229,10 +229,17 @@ impl RepositoryCliExt for Repository {
                 // handling the branch-targeted path applies. A detached
                 // worktree has no branch to fall back to, so it proceeds and
                 // surfaces the removal error.
+                //
+                // The prune names this worktree rather than sweeping the repo,
+                // so a sibling whose directory is merely absent right now keeps
+                // its registration. `git worktree remove` refuses a locked
+                // worktree where a repo-wide prune ignored one, which needs no
+                // guard here: the lock check above already returned for every
+                // locked entry in this arm.
                 if let Some(branch) = wt.branch.as_deref()
                     && !wt.path.exists()
                 {
-                    self.prune_worktrees()?;
+                    self.prune_worktree_entry(&wt.path)?;
                     Resolved::BranchOnly {
                         pruned_from: Some(wt.path.clone()),
                         branch: branch.to_string(),
