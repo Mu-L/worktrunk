@@ -25,28 +25,27 @@
 //!
 //! ## Environment Isolation
 //!
-//! No `git` the suite runs reads the developer's `~/.gitconfig`. The guarantee
-//! is environment, not a file: the `wt-test-env` constructor
-//! (`tests/helpers/test-env`) runs before `main` in every test binary and
-//! points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not
-//! exist, adding `user.useConfigOnly` through `GIT_CONFIG_COUNT` so a git with
-//! no identity fails rather than guessing one from the host. That is the only
-//! layer that can cover git spawned *in-process*: `Repository::run_command`
-//! builds a plain `Cmd::new("git")`, so a test driving production code has no
-//! per-command hook to reach, and a test cannot set its own process
-//! environment — under `cargo test`, tests are parallel threads, and
-//! `std::env::set_var` beside them is the race that makes it `unsafe`. Before
-//! `main` the process has one thread, so the constructor is where the write is
-//! sound. `assert_hermetic_floor` trips at fixture construction when a test
-//! target forgets to link the crate.
+//! No `git` the suite runs reads the developer's `~/.gitconfig`. The
+//! guarantee is `shell_exec::HERMETIC_TEST_GIT_ENV` — the deny pair pointing
+//! `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not exist,
+//! plus `user.useConfigOnly` through `GIT_CONFIG_COUNT` so a git with no
+//! identity fails rather than guessing one from the host — applied to every
+//! child at its spawn site. For the git that *production* code spawns while a
+//! test drives it in-process, the spawn site is `Cmd`, and the harness has no
+//! per-command hook there; instead the fixture constructors latch
+//! `shell_exec::enable_hermetic_test_env`, and `Cmd` applies the floor to
+//! every child while the latch is set. (A test cannot set its own process
+//! environment instead — under `cargo test` tests are parallel threads, and
+//! `std::env::set_var` beside them is the race that makes it `unsafe`; the
+//! atomic latch is sound from any thread.)
 //!
-//! The rest is downstream of it:
+//! The rest applies the same floor at the spawn sites the harness does own:
 //!
 //! - [`git_test_env`] restates the deny pair per command and adds the test
 //!   identity, which the floor leaves to the per-command layers.
-//! - [`isolate_subprocess_env`] scrubs the host's `GIT_*` from `wt` children but
-//!   passes the whole `GIT_CONFIG_*` family through, so a subprocess inherits
-//!   the same floor.
+//! - [`isolate_subprocess_env`] scrubs the host's `GIT_*` from `wt` children
+//!   and re-applies the floor explicitly, so a subprocess denies host config
+//!   just as this process does.
 //!
 //! On top of that isolation the helpers pin commit timestamps, locale, and
 //! terminal width, all per command — no test mutates process-global state.
@@ -59,7 +58,7 @@ use std::process::Command;
 
 use crate::config::sanitize_branch_name;
 use crate::git::Repository;
-use crate::shell_exec::{Cmd, INHERITED_GIT_PATH_VARS};
+use crate::shell_exec::{self, Cmd, INHERITED_GIT_PATH_VARS};
 use path_slash::PathExt;
 
 use self::mock_commands::{MockConfig, MockResponse};
@@ -231,7 +230,7 @@ fn build_standard_fixture(root: &Path) {
 /// Pure Rust recursive copy - 2.5x faster than spawning cp/robocopy.
 /// Benchmarked at 21ms vs 53ms per fixture copy on macOS.
 fn copy_standard_fixture(dest: &Path) -> FixtureWorktrees {
-    assert_hermetic_floor();
+    shell_exec::enable_hermetic_test_env();
 
     fn copy_dir_recursive(src: &Path, dest: &Path) {
         std::fs::create_dir_all(dest).unwrap();
@@ -311,9 +310,9 @@ const TEST_IDENTITY_EMAIL: &str = "test@example.com";
 /// must hold for it lives here.
 ///
 /// What it does *not* have to carry is host-config denial or the floor's
-/// settings. The `wt-test-env` constructor supplies both as process
-/// environment before `main`, so an in-process git resolves those rather than
-/// the developer's — see the Git Config Isolation section of
+/// settings. The hermetic latch (`shell_exec::enable_hermetic_test_env`)
+/// puts both on every `Cmd` child, so an in-process git resolves those
+/// rather than the developer's — see the Git Config Isolation section of
 /// `tests/CLAUDE.md`.
 ///
 /// `protocol.allow = never` with a `file` exception is the config spelling of
@@ -495,11 +494,15 @@ pub fn pty_env_vars(paths: TestEnvPaths<'_>) -> Vec<(String, String)> {
         .chain(PTY_TEST_ENV_VARS)
         .map(|&(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    // A PTY child is `env_clear`ed, so the `GIT_CONFIG_*` floor that
-    // `wt-test-env` sets for this process reaches it only if carried
-    // across by hand — every other transport inherits it. Ahead of
-    // `git_test_env` so its deny pair still wins.
-    vars.extend(std::env::vars().filter(|(key, _)| key.starts_with(HERMETIC_GIT_CONFIG_PREFIX)));
+    // A PTY child is `env_clear`ed, so the hermetic floor reaches it only if
+    // carried across by hand — every other transport gets it from the `Cmd`
+    // latch or `isolate_subprocess_env`. Ahead of `git_test_env` so its deny
+    // pair still wins.
+    vars.extend(
+        shell_exec::HERMETIC_TEST_GIT_ENV
+            .iter()
+            .map(|&(k, v)| (k.to_string(), v.to_string())),
+    );
     vars.extend(git_test_env().into_iter().map(|(k, v)| (k.to_string(), v)));
 
     vars.extend(
@@ -586,40 +589,11 @@ fn default_llvm_profile_file_with(inherited: Option<std::ffi::OsString>) -> std:
     dir.join("cov-%m_%p.profraw").into_os_string()
 }
 
-/// The `GIT_*` prefix [`isolate_subprocess_env`] passes through instead of
-/// scrubbing.
-///
-/// The whole `GIT_CONFIG_*` family carries the suite's hermetic floor — the
-/// deny pair plus `GIT_CONFIG_COUNT` and its numbered keys and values, all set
-/// by the `wt-test-env` constructor before `main`. Scrubbing any of
-/// them would hand the child back the developer's `~/.gitconfig`, the opposite
-/// of what the scrub is for. Passing the family by prefix rather than by name
-/// costs nothing: the constructor overwrites every member it sets, so a
-/// host-exported one is gone before a child sees it.
-const HERMETIC_GIT_CONFIG_PREFIX: &str = "GIT_CONFIG_";
-
-/// Fails fast when the test binary forgot to link the hermetic env floor.
-///
-/// The floor is installed by a pre-`main` constructor that only runs if the
-/// binary links `wt-test-env`, one `use wt_test_env as _;` in each test
-/// target's crate root. A target that forgets the line would silently run
-/// against the developer's git config — exactly the hole the floor closes —
-/// so the fixture constructors call this and turn the miss into an
-/// actionable failure. `GIT_CONFIG_COUNT` is the sentinel because the floor
-/// is its only writer; the deny pair alone is also restated per-command.
-fn assert_hermetic_floor() {
-    assert!(
-        std::env::var_os("GIT_CONFIG_COUNT").is_some(),
-        "hermetic env floor missing: this binary does not link wt-test-env; \
-         add `use wt_test_env as _;` to its crate root (see tests/helpers/test-env)"
-    );
-}
-
 /// Prepare a subprocess to run with a clean wt environment.
 ///
-/// Strips every `GIT_*` and `WORKTRUNK_*` from the parent env — bar
-/// `HERMETIC_GIT_CONFIG_PREFIX` — plus
-/// `NO_COLOR` / `FORCE_HYPERLINK` / `SHELL` / `PSModulePath`, then points the three
+/// Strips every `GIT_*` and `WORKTRUNK_*` from the parent env, plus
+/// `NO_COLOR` / `FORCE_HYPERLINK` / `SHELL` / `PSModulePath`; re-applies the
+/// hermetic floor (`shell_exec::HERMETIC_TEST_GIT_ENV`), then points the three
 /// `WORKTRUNK_*_PATH` env vars at known locations:
 ///
 /// - `WORKTRUNK_CONFIG_PATH` ← `user_config` (or [`DEFAULT_ISOLATED_USER_CONFIG`])
@@ -654,11 +628,15 @@ where
     I: IntoIterator<Item = String>,
 {
     for key in env_keys {
-        if (key.starts_with("GIT_") || key.starts_with("WORKTRUNK_"))
-            && !key.starts_with(HERMETIC_GIT_CONFIG_PREFIX)
-        {
+        if key.starts_with("GIT_") || key.starts_with("WORKTRUNK_") {
             cmd.env_remove(&key);
         }
+    }
+    // The hermetic floor, restated explicitly now that every inherited
+    // `GIT_*` is gone — the subprocess must deny the host's git config just
+    // as this process does.
+    for (key, val) in shell_exec::HERMETIC_TEST_GIT_ENV {
+        cmd.env(key, val);
     }
     cmd.env_remove("NO_COLOR");
     // Overrides the OSC 8 probe, so an inherited value changes whether `wt
@@ -911,12 +889,11 @@ pub fn configure_cli_command(cmd: &mut Command) {
 /// [`configure_git_env`] (`Cmd`), and [`pty_env_vars`] (PTY) all
 /// consume it, so the three spellings cannot drift.
 ///
-/// The identity is here rather than in the `wt-test-env` floor because the
-/// floor carries only what must exist process-wide before `main` — denial and
-/// the two `-c` settings; identity already has this per-command home, and a
-/// second copy in the floor could only drift from it. A harness-built `git`
-/// needs one because it commits into repos it has just created, before
-/// `LOCAL_TEST_CONFIG` reaches their local config.
+/// The identity is here rather than in the hermetic floor because the floor
+/// carries only the denial and the two `-c` settings; identity already has
+/// this per-command home, and a second copy in the floor could only drift
+/// from it. A harness-built `git` needs one because it commits into repos it
+/// has just created, before `LOCAL_TEST_CONFIG` reaches their local config.
 pub fn git_test_env() -> [(&'static str, String); 13] {
     [
         ("GIT_CONFIG_GLOBAL", NULL_DEVICE.to_string()),
@@ -939,11 +916,17 @@ pub fn git_test_env() -> [(&'static str, String); 13] {
 ///
 /// Applies [`git_test_env`].
 pub fn configure_git_cmd(cmd: &mut Command) {
+    shell_exec::enable_hermetic_test_env();
     // Defensive: every existing caller is downstream of `configure_cli_command`
     // (which already stripped these via `isolate_subprocess_env`), but a future
     // test that spawns `git` from an unprepared parent shouldn't be vulnerable
     // to an inherited relative `GIT_DIR` redirecting discovery.
     scrub_git_path_vars(cmd);
+    // The floor by hand — a plain `Command` child doesn't pass through the
+    // `Cmd` latch. Ahead of `git_test_env` so its deny pair still wins.
+    for (key, val) in shell_exec::HERMETIC_TEST_GIT_ENV {
+        cmd.env(key, val);
+    }
     for (key, value) in git_test_env() {
         cmd.env(key, value);
     }
@@ -954,6 +937,7 @@ pub fn configure_git_cmd(cmd: &mut Command) {
 /// This is the `Cmd` equivalent of [`configure_git_cmd`]. Use this when building
 /// git commands via the builder pattern (`Cmd::new("git")`).
 pub fn configure_git_env(cmd: Cmd) -> Cmd {
+    shell_exec::enable_hermetic_test_env();
     // Defensive `GIT_*` path-var strip — see `configure_git_cmd` for rationale.
     let cmd = INHERITED_GIT_PATH_VARS
         .iter()
@@ -1311,7 +1295,7 @@ impl TestRepo {
     /// Shared initializer for `new()`, `bare()`, and `empty()`: makes a tempdir
     /// and runs `git init` with the given arguments inside it.
     fn init_repo(git_args: &[&str]) -> Self {
-        assert_hermetic_floor();
+        shell_exec::enable_hermetic_test_env();
         let temp_dir = test_tempdir();
         let root = temp_dir.path().join("repo");
         std::fs::create_dir(&root).unwrap();
@@ -3554,20 +3538,12 @@ mod tests {
         });
         let keys: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
 
-        // `wt-test-env`'s constructor is what puts these in this process's
-        // env, so this also fails if the floor stops being applied at all.
-        assert!(
-            keys.contains(&"GIT_CONFIG_COUNT"),
-            "PTY children lost the GIT_CONFIG_* floor: {keys:?}"
-        );
-        let count: usize = std::env::var("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
-        for i in 0..count {
-            for var in [
-                format!("GIT_CONFIG_KEY_{i}"),
-                format!("GIT_CONFIG_VALUE_{i}"),
-            ] {
-                assert!(keys.contains(&var.as_str()), "{var} missing: {keys:?}");
-            }
+        // A PTY child is `env_clear`ed and never passes through the `Cmd`
+        // latch, so `pty_env_vars` is the floor's only route in — every
+        // member must be present, the numbered settings as much as the deny
+        // pair.
+        for (var, _) in shell_exec::HERMETIC_TEST_GIT_ENV {
+            assert!(keys.contains(&var), "{var} missing: {keys:?}");
         }
     }
 
@@ -3612,18 +3588,17 @@ mod tests {
         // Not scrubbed: vars that don't match either prefix.
         assert!(!removed.contains_key("PATH"));
         assert!(!removed.contains_key("HOME"));
-        // Nor any of the `GIT_CONFIG_*` family that carries the hermetic floor —
-        // the child inherits it instead of falling back to `~/.gitconfig`. The
+        // The `GIT_CONFIG_*` family is scrubbed like the rest of `GIT_*`, then
+        // re-set to the hermetic floor's values — a host-exported member can't
+        // reach the child, and the child still denies `~/.gitconfig`. The
         // numbered members matter as much as the deny pair: drop them and the
         // child keeps the denial but loses every setting it was denying *for*.
-        for var in [
-            "GIT_CONFIG_GLOBAL",
-            "GIT_CONFIG_SYSTEM",
-            "GIT_CONFIG_COUNT",
-            "GIT_CONFIG_KEY_0",
-            "GIT_CONFIG_VALUE_0",
-        ] {
-            assert!(!removed.contains_key(var), "{var} should pass through");
+        for (var, val) in shell_exec::HERMETIC_TEST_GIT_ENV {
+            assert_eq!(
+                removed.get(var),
+                Some(&Some(val.to_string())),
+                "{var} should be re-set to the floor value"
+            );
         }
         // No underscore — prefix check requires `GIT_`/`WORKTRUNK_`.
         assert!(!removed.contains_key("GIT"));
@@ -3663,9 +3638,9 @@ mod tests {
     /// The isolation the whole suite rests on, asserted where it is weakest.
     ///
     /// `Repository::run_command` builds a plain `Cmd::new("git")` with no
-    /// `GIT_CONFIG_*` of its own, so what it resolves is whatever the test
-    /// process inherited — which `wt-test-env`'s pre-`main` constructor pins
-    /// to the environment floor. Resolving it through the production API fails loudly if the layer
+    /// `GIT_CONFIG_*` of its own, so what its child resolves is whatever env
+    /// the spawn site gives it — which the hermetic latch pins to the floor
+    /// for every `Cmd` child. Resolving it through the production API fails loudly if the layer
     /// goes missing, instead of leaving the suite to read the developer's
     /// `~/.gitconfig` and pass or fail on its contents.
     #[test]

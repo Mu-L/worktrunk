@@ -12,9 +12,6 @@
 //   cargo bench --bench remove              # All variants
 //   cargo bench --bench remove -- no_hooks  # Just no-hooks variant
 
-// The pre-main hermetic env floor — see tests/helpers/test-env.
-use wt_test_env as _;
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::path::{Path, PathBuf};
 use std::process::Command;

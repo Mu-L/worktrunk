@@ -1,9 +1,5 @@
 [workspace]
-members = [
-    "tests/helpers/wt-perf",
-    "tests/helpers/mock-stub",
-    "tests/helpers/test-env",
-]
+members = ["tests/helpers/wt-perf", "tests/helpers/mock-stub"]
 # Include the helper packages so a workspace `cargo test` builds their
 # binaries: mock-stub via its dummy tests/builds.rs, wt-perf via its real
 # in-package CLI tests.
@@ -338,7 +334,6 @@ regex = "1.12.3"
 vt100 = "0.16.2"
 ansi-to-html = "0.2.3"
 wt-perf = { path = "tests/helpers/wt-perf" }
-wt-test-env = { path = "tests/helpers/test-env" }
 similar = "3.1.1"
 
 [[bench]]

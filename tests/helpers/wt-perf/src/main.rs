@@ -2,11 +2,6 @@
 //!
 //! Run `wt-perf --help` (and `wt-perf <subcommand> --help`) for usage.
 
-// The pre-main hermetic env floor — see tests/helpers/test-env. wt-perf's
-// git and `wt` children inherit this process's env, so the floor must be
-// present here just as in the test binaries.
-use wt_test_env as _;
-
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

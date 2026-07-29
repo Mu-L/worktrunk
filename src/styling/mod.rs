@@ -173,10 +173,10 @@ mod tests {
 
     #[test]
     fn terminal_width_for_statusline_returns_a_width() {
-        // End-to-end smoke test. Under cargo test, `COLUMNS=80` is set by
-        // the `wt-test-env` floor, so a width is always detectable.
+        // End-to-end smoke test. Under cargo test, `COLUMNS=80` is set in
+        // `.cargo/config.toml`, so a width is always detectable.
         let width = terminal_width_for_statusline();
-        assert!(width.expect("COLUMNS=80 is set by the wt-test-env floor") > 0);
+        assert!(width.expect("COLUMNS=80 is set in .cargo/config.toml") > 0);
     }
 
     #[test]
@@ -199,12 +199,12 @@ mod tests {
 
     #[test]
     fn terminal_dimensions_returns_a_width() {
-        // Under cargo test, `COLUMNS=80` is set by the `wt-test-env` floor, so a
+        // Under cargo test, `COLUMNS=80` is set in `.cargo/config.toml`, so a
         // width is always available even with no TTY. Height depends on the
         // environment (a real TTY yields `Some`; the `COLUMNS` fallback yields
         // `None`), so only the width is asserted.
         let (width, _height) =
-            terminal_dimensions().expect("COLUMNS=80 is set by the wt-test-env floor");
+            terminal_dimensions().expect("COLUMNS=80 is set in .cargo/config.toml");
         assert!(width > 0);
     }
 

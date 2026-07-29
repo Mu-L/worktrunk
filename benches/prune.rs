@@ -44,9 +44,6 @@
 // and read the `prune-gather` / `prune-scan` / `prune-check:*` /
 // `prune-remove:*` spans.
 
-// The pre-main hermetic env floor — see tests/helpers/test-env.
-use wt_test_env as _;
-
 use std::cell::Cell;
 use std::path::Path;
 use std::process::Command;

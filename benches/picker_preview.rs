@@ -37,9 +37,6 @@
 //   cargo bench --bench picker_preview warm            # warm only
 //   cargo bench --bench picker_preview -- --exact picker_preview/warm/typical-8
 
-// The pre-main hermetic env floor — see tests/helpers/test-env.
-use wt_test_env as _;
-
 #[cfg(not(unix))]
 fn main() {
     // Picker is Unix-only; benchmark is a no-op on Windows.

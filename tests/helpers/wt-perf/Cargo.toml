@@ -12,8 +12,6 @@ publish = false
 description = "Performance testing and tracing tools for worktrunk"
 
 [dependencies]
-wt-test-env = { path = "../test-env" }
-
 # For repo setup
 tempfile = "3.27"
 dunce = "1"

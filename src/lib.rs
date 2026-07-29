@@ -29,11 +29,5 @@ pub mod utils;
 #[doc(hidden)]
 pub mod testing;
 
-// Installs the pre-main hermetic env floor (see tests/helpers/test-env) into
-// this crate's unit-test binary. Every test target carries this line in its
-// crate root; `testing::assert_hermetic_floor` trips when one forgets it.
-#[cfg(test)]
-use wt_test_env as _;
-
 // Re-export HookType for convenience
 pub use git::HookType;

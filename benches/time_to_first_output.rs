@@ -13,9 +13,6 @@
 //   cargo bench --bench time_to_first_output -- remove  # Just remove
 //   cargo bench --bench time_to_first_output -- switch  # Just switch
 
-// The pre-main hermetic env floor — see tests/helpers/test-env.
-use wt_test_env as _;
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::path::Path;
 use std::process::Command;

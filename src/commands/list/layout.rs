@@ -1567,7 +1567,7 @@ mod tests {
         let layout = calculate_layout_with_width(
             &items,
             &tasks,
-            terminal_width().expect("COLUMNS=80 is set by the wt-test-env floor"),
+            terminal_width().expect("COLUMNS=80 is set in .cargo/config.toml"),
             &main_worktree_path,
             None,
             None,
@@ -1684,7 +1684,7 @@ mod tests {
         let layout = calculate_layout_with_width(
             &items,
             &tasks,
-            terminal_width().expect("COLUMNS=80 is set by the wt-test-env floor"),
+            terminal_width().expect("COLUMNS=80 is set in .cargo/config.toml"),
             &main_worktree_path,
             None,
             None,

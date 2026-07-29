@@ -9,9 +9,6 @@
 
 #![cfg(unix)]
 
-// The pre-main hermetic env floor — see tests/helpers/test-env.
-use wt_test_env as _;
-
 use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 

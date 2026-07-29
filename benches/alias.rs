@@ -29,9 +29,6 @@
 //   cargo bench --bench alias dispatch/cold            # Stub-cold only (excludes with_vars)
 //   cargo bench --bench alias -- --sample-size 10      # Fast iteration
 
-// The pre-main hermetic env floor — see tests/helpers/test-env.
-use wt_test_env as _;
-
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::path::Path;
 use std::process::Command;
