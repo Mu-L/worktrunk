@@ -34,7 +34,7 @@ The one setup script here, `build-bins`, is a build step rather than a behavior 
 task profile-tests   # CPU accounting, per-test timings, temp-leak check
 ```
 
-The integration binary dominates: ~2,200 tests averaging ~0.6s, each spawning `wt` and `git` against a fresh fixture copy. Two thirds of the suite's CPU is kernel time, so the cost is process creation and filesystem churn rather than computation, and it sits in a broad middle rather than in a few outliers. Track `user`/`sys` from the `time` line; wall time is unreliable whenever a sibling worktree is building or testing, which on this project is most of the time. Per-test durations land in `target/nextest/perf/junit.xml`.
+The integration binary dominates: ~2,200 tests averaging ~0.6s, each spawning `wt` and `git` against a fresh fixture copy. Two thirds of the suite's CPU is kernel time, so the cost is process creation and filesystem churn rather than computation, and it sits in a broad middle rather than in a few outliers. Track `user`/`sys` from the `time` line; wall time is unreliable whenever a sibling worktree is building or testing, which on this project is most of the time. Per-test durations land in `target/nextest/perf/junit.xml`. The task shells out to `/usr/bin/time`, which macOS ships but minimal Linux distros don't — install GNU time (`apt install time`) if the task fails there.
 
 The fixtures put their temp directories under `test_temp_root()` (`$TMPDIR/wt`) rather than directly in the system temp dir, and `test_tempdir()` is the fixture-side replacement for `TempDir::new()`. Entries in the shared temp root are cheap to ignore but expensive to enumerate, and `git::recover::recover_from_path` reads every ancestor directory of a deleted CWD — its own unit test ran 14.2s against a temp root holding 454k entries and 0.06s rooted here. That root's short name is load-bearing: a unix socket path can't exceed 104 bytes on macOS, and `test_copy_ignored_skips_non_regular_files` binds one 89 bytes in.
 
@@ -178,7 +178,7 @@ reads in production drops `TEST` and keeps `WORKTRUNK_`.
 
 The harness applies the same floor at the spawn sites it does own:
 
-- `git_test_env` — reaching git through `configure_git_env` / `configure_git_cmd` (`TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()`) and a PTY child through `pty_env_vars` — restates the deny pair per command and adds the test identity; `configure_git_cmd` also re-applies the full floor, since a plain `Command` child bypasses the `Cmd` latch.
+- `git_test_env` — reaching git through `configure_git_env` / `configure_git_cmd` (`TestRepo::git_command()`, `run_git()`, `run_git_in()`, `git_output()`, `commit_in()`) and a PTY child through `pty_env_vars` — adds the test identity, pinned dates, and locale; `configure_git_cmd` also applies the floor, since a plain `Command` child bypasses the `Cmd` latch.
 - `isolate_subprocess_env` scrubs every inherited `GIT_*` from `wt` children — a host-exported `GIT_CONFIG_*` included — then re-applies the floor explicitly, so a subprocess denies host config just as this process does.
 - `pty_env_vars` carries the floor across by hand, because a PTY child is `env_clear`ed and inherits nothing. `pty_env_vars_carry_the_git_config_floor` pins it: `useConfigOnly` fires only where an identity is missing, so no PTY assertion would notice it going missing.
 
@@ -241,7 +241,7 @@ none of `configure_git_env`'s per-command variables apply — no
 `GIT_ALLOW_PROTOCOL`, no per-test `GIT_CONFIG_GLOBAL`. Host *config* is not
 among the gaps: the latched floor above already denies it. The
 repo's own config is the one layer such a command still reads, so every
-`TestRepo` constructor appends `LOCAL_TEST_CONFIG` (identity, `commit.gpgsign`,
+`TestRepo` constructor appends `LOCAL_TEST_CONFIG` (identity
 and the `protocol.allow` transport deny) to it. The identity is required rather
 than convenient — the floor sets `user.useConfigOnly` and carries no name, so a
 repo without one fails its commit instead of authoring from the host's username.

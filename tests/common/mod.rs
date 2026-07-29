@@ -569,7 +569,6 @@ pub fn shell_command(
 /// These redact volatile metadata captured by insta-cmd in the `info` block.
 /// Called by all snapshot settings helpers for consistency.
 pub fn add_standard_env_redactions(settings: &mut insta::Settings) {
-    settings.add_redaction(".env.GIT_CONFIG_GLOBAL", "[TEST_GIT_CONFIG]");
     settings.add_redaction(".env.WORKTRUNK_CONFIG_PATH", "[TEST_CONFIG]");
     settings.add_redaction(".env.WORKTRUNK_SYSTEM_CONFIG_PATH", "[TEST_SYSTEM_CONFIG]");
     settings.add_redaction(

@@ -41,8 +41,8 @@
 //!
 //! The rest applies the same floor at the spawn sites the harness does own:
 //!
-//! - [`git_test_env`] restates the deny pair per command and adds the test
-//!   identity, which the floor leaves to the per-command layers.
+//! - [`git_test_env`] adds the test identity, pinned dates, and locale per
+//!   command, which the floor leaves to the per-command layers.
 //! - [`isolate_subprocess_env`] scrubs the host's `GIT_*` from `wt` children
 //!   and re-applies the floor explicitly, so a subprocess denies host config
 //!   just as this process does.
@@ -305,7 +305,7 @@ const TEST_IDENTITY_EMAIL: &str = "test@example.com";
 /// A unit test driving the library in-process — `Repository::run_command` and
 /// everything layered on it — gets a `git` carrying the *test process's*
 /// environment, so none of [`configure_git_env`]'s per-command isolation
-/// applies: no `GIT_ALLOW_PROTOCOL`, and no per-test `GIT_CONFIG_GLOBAL`. The
+/// applies: no `GIT_ALLOW_PROTOCOL`, no identity, no pinned dates. The
 /// repo's own config is the one layer such a command still reads, so whatever
 /// must hold for it lives here.
 ///
@@ -324,8 +324,6 @@ const TEST_IDENTITY_EMAIL: &str = "test@example.com";
 const LOCAL_TEST_CONFIG: &str = r#"[user]
 	name = Test User
 	email = test@example.com
-[commit]
-	gpgsign = false
 [protocol]
 	allow = never
 [protocol "file"]
@@ -496,8 +494,7 @@ pub fn pty_env_vars(paths: TestEnvPaths<'_>) -> Vec<(String, String)> {
         .collect();
     // A PTY child is `env_clear`ed, so the hermetic floor reaches it only if
     // carried across by hand — every other transport gets it from the `Cmd`
-    // latch or `isolate_subprocess_env`. Ahead of `git_test_env` so its deny
-    // pair still wins.
+    // latch or `isolate_subprocess_env`.
     vars.extend(
         shell_exec::HERMETIC_TEST_GIT_ENV
             .iter()
@@ -530,13 +527,6 @@ pub fn pty_env_vars(paths: TestEnvPaths<'_>) -> Vec<(String, String)> {
 
     vars
 }
-
-/// Null device path, platform-appropriate.
-/// Use this for GIT_CONFIG_SYSTEM to disable system config in tests.
-#[cfg(windows)]
-pub const NULL_DEVICE: &str = "NUL";
-#[cfg(not(windows))]
-pub const NULL_DEVICE: &str = "/dev/null";
 
 /// Default user-config path for isolated subprocesses — points at a
 /// nonexistent file so wt treats it as "no config." Callers can override
@@ -881,9 +871,11 @@ pub fn configure_cli_command(cmd: &mut Command) {
     // callers get the same defense; nothing extra needed here.
 }
 
-/// The environment for a directly-spawned test `git`: no config files,
-/// deterministic identity, timestamps and locale, no terminal prompts, no
-/// network transports (`GIT_ALLOWED_PROTOCOLS`).
+/// The environment for a directly-spawned test `git`: deterministic identity,
+/// timestamps and locale, no terminal prompts, no network transports
+/// (`GIT_ALLOWED_PROTOCOLS`). Host-config denial is not here — that is the
+/// hermetic floor's job (`shell_exec::HERMETIC_TEST_GIT_ENV`), which every
+/// consumer of this set applies through its own transport.
 ///
 /// Single home for these settings — [`configure_git_cmd`] (Command),
 /// [`configure_git_env`] (`Cmd`), and [`pty_env_vars`] (PTY) all
@@ -894,10 +886,8 @@ pub fn configure_cli_command(cmd: &mut Command) {
 /// this per-command home, and a second copy in the floor could only drift
 /// from it. A harness-built `git` needs one because it commits into repos it
 /// has just created, before `LOCAL_TEST_CONFIG` reaches their local config.
-pub fn git_test_env() -> [(&'static str, String); 13] {
+pub fn git_test_env() -> [(&'static str, String); 11] {
     [
-        ("GIT_CONFIG_GLOBAL", NULL_DEVICE.to_string()),
-        ("GIT_CONFIG_SYSTEM", NULL_DEVICE.to_string()),
         ("GIT_AUTHOR_NAME", TEST_IDENTITY_NAME.to_string()),
         ("GIT_AUTHOR_EMAIL", TEST_IDENTITY_EMAIL.to_string()),
         ("GIT_COMMITTER_NAME", TEST_IDENTITY_NAME.to_string()),
@@ -923,7 +913,7 @@ pub fn configure_git_cmd(cmd: &mut Command) {
     // to an inherited relative `GIT_DIR` redirecting discovery.
     scrub_git_path_vars(cmd);
     // The floor by hand — a plain `Command` child doesn't pass through the
-    // `Cmd` latch. Ahead of `git_test_env` so its deny pair still wins.
+    // `Cmd` latch.
     for (key, val) in shell_exec::HERMETIC_TEST_GIT_ENV {
         cmd.env(key, val);
     }

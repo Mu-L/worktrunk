@@ -152,8 +152,8 @@ pub fn parse_pair(config: &str, prefix: &str) -> Option<(usize, usize)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
-/// Build a `git` command isolated from host context, with config
-/// redirected to `NULL_DEVICE`. Thin call-site wrapper around
+/// Build a `git` command isolated from host context, with the host's
+/// config denied by the hermetic floor. Thin call-site wrapper around
 /// [`configure_git_cmd`] — every git invocation in this crate goes
 /// through here. Doesn't set `current_dir`; callers do that explicitly
 /// when they have a target. Network transports are denied; the upstream

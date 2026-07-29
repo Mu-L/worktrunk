@@ -603,18 +603,18 @@ pub const HERMETIC_TEST_GIT_ENV: [(&str, &str); 7] = [
 /// the pragmatic middle over its alternatives — a pre-`main` constructor
 /// crate every test target must link, or threading an explicit env value
 /// through `Repository`, which is the structural fix.
-static HERMETIC_TEST_ENV: AtomicBool = AtomicBool::new(false);
+static HERMETIC_TEST_ENV_LATCHED: AtomicBool = AtomicBool::new(false);
 
 /// Latch [`HERMETIC_TEST_GIT_ENV`] onto every future [`Cmd`] child in this
 /// process. Called by the `worktrunk::testing` harness; idempotent.
 pub fn enable_hermetic_test_env() {
-    HERMETIC_TEST_ENV.store(true, Ordering::Relaxed);
+    HERMETIC_TEST_ENV_LATCHED.store(true, Ordering::Relaxed);
 }
 
 /// Apply [`HERMETIC_TEST_GIT_ENV`] to `cmd` if the latch is set. The unlatched
 /// path is production's: one relaxed load, no env writes.
 pub fn apply_hermetic_test_env(cmd: &mut std::process::Command) {
-    if HERMETIC_TEST_ENV.load(Ordering::Relaxed) {
+    if HERMETIC_TEST_ENV_LATCHED.load(Ordering::Relaxed) {
         for (key, val) in HERMETIC_TEST_GIT_ENV {
             cmd.env(key, val);
         }
