@@ -160,8 +160,15 @@ impl RepoConfig {
 /// [`ensure_prune_real_repo`].)
 pub enum SetupConfig {
     Flat(RepoConfig),
-    Mixed { worktrees: usize, branches: usize },
-    Prune { merged: usize, unmerged: usize },
+    Mixed {
+        worktrees: usize,
+        branches: usize,
+        remote_refs: usize,
+    },
+    Prune {
+        merged: usize,
+        unmerged: usize,
+    },
 }
 
 impl SetupConfig {
@@ -175,8 +182,9 @@ impl SetupConfig {
             SetupConfig::Mixed {
                 worktrees,
                 branches,
+                remote_refs,
             } => {
-                create_mixed_repo_at(*worktrees, *branches, base_path);
+                create_mixed_repo_at(*worktrees, *branches, *remote_refs, base_path);
                 (*worktrees, *branches)
             }
             SetupConfig::Prune { merged, unmerged } => {
@@ -520,6 +528,73 @@ pub fn add_worktrees(config: &RepoConfig, repo_path: &Path) {
             std::fs::write(&file_path, "Uncommitted content\n").unwrap();
         }
     }
+}
+
+/// Create `count` remote-tracking refs under `refs/remotes/origin/`, on top of
+/// the `origin/main` + `origin/HEAD` pair [`setup_fake_remote`] writes.
+///
+/// The refs are spread round-robin over the commits already on `main` rather
+/// than all pointing at `HEAD`, which would leave `%(committerdate)` re-reading
+/// one object and understate the scan. It does not reach one object per ref:
+/// the round-robin can only spread over the history it has, so at
+/// `create_mixed_repo`'s 200 commits a four-digit ref count lands ~7 refs on
+/// each of ~200 distinct commits. Git parses a given object once and reuses it
+/// for the rest of the `for-each-ref`, so the scan pays ~200 parses plus a
+/// cheap iteration hit per ref, where a real long-lived clone — whose remote
+/// tips are mostly distinct commits — would pay a parse per ref.
+///
+/// So this under-weights object reads relative to the clone it models, and
+/// deliberately: closing the gap needs a history as deep as the ref count, and
+/// `BASE_COMMITS` is shared with `full`, so deepening it would slow that
+/// fixture and shift the repo `full` has been measured on for the sake of a
+/// per-object parse this bench is not primarily about. The ref-count dimension
+/// is what it exists to vary.
+///
+/// Timestamps are all `TEST_EPOCH` regardless — fixture commit dates are pinned
+/// — so the sort is not what this measures.
+///
+/// Names are `remote-only-<i>`, which no fixture uses for a local branch, so
+/// every one of them survives the "skip remotes shadowed by a local branch"
+/// filter in `branches_for_completion` and reaches the candidate list.
+///
+/// One `update-ref --stdin` fork writes the whole batch; the per-ref
+/// alternative costs a fork each and dominates fixture build time at the
+/// four-digit counts this exists to model.
+fn add_remote_refs(count: usize, repo_path: &Path) {
+    if count == 0 {
+        return;
+    }
+
+    let commits: Vec<String> = capture_git(repo_path, &["rev-list", "HEAD"])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !commits.is_empty(),
+        "fixture has no commits to point refs at"
+    );
+
+    let mut stdin = String::new();
+    for i in 0..count {
+        let sha = &commits[i % commits.len()];
+        stdin.push_str(&format!(
+            "create refs/remotes/origin/remote-only-{i} {sha}\n"
+        ));
+    }
+
+    let mut child = git_command()
+        .args(["update-ref", "--stdin"])
+        .current_dir(repo_path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Take the handle so it drops (closing the pipe) before the wait —
+    // git reads to EOF, so holding it open here deadlocks.
+    let mut pipe = child.stdin.take().unwrap();
+    std::io::Write::write_all(&mut pipe, stdin.as_bytes()).unwrap();
+    drop(pipe);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "git update-ref --stdin failed: {status}");
 }
 
 /// Set up a fake remote for default branch detection.
@@ -1032,14 +1107,14 @@ fn append_line(path: &Path, rel: &str, line: &str) {
 /// 2. diverged: a short own-commit chain forked from an older checkpoint
 ///    while base advanced (deep two-sided divergence)
 /// 3. identical to the base tip (trees match — squash-merge shape)
-pub fn create_mixed_repo(worktrees: usize, branches: usize) -> FixtureRepo {
-    FixtureRepo::create(|repo| create_mixed_repo_at(worktrees, branches, repo))
+pub fn create_mixed_repo(worktrees: usize, branches: usize, remote_refs: usize) -> FixtureRepo {
+    FixtureRepo::create(|repo| create_mixed_repo_at(worktrees, branches, remote_refs, repo))
 }
 
 /// [`create_mixed_repo`] at a caller-chosen path (used by `wt-perf setup
 /// mixed-W-B`). The main worktree is created at `repo`; linked worktrees are
 /// siblings.
-fn create_mixed_repo_at(worktrees: usize, branches: usize, repo: &Path) {
+fn create_mixed_repo_at(worktrees: usize, branches: usize, remote_refs: usize, repo: &Path) {
     const FILES: usize = 50;
     // Deep enough that fork points spread across history give the
     // `%(ahead-behind)` walk real commits to traverse (GH #461 shape), while
@@ -1108,6 +1183,7 @@ fn create_mixed_repo_at(worktrees: usize, branches: usize, repo: &Path) {
     // loose refs and uncommitted state — realistic, and keeps gc away from the
     // dirty indexes below).
     setup_fake_remote(&repo);
+    add_remote_refs(remote_refs, &repo);
     run_git(&repo, &["gc", "-q"]);
 
     // Linked worktrees are siblings named `<repo-dir>.<branch>` (worktrunk
@@ -1467,7 +1543,7 @@ pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 /// - `branches-N` - N branches with 1 commit each
 /// - `branches-N-M` - N branches with M commits each
 /// - `divergent` - many divergent branches (GH #461)
-/// - `mixed-W-B` - W worktrees + B branches in varied states
+/// - `mixed-W-B[-R]` - W worktrees + B branches in varied states, plus R remote-tracking refs
 /// - `prune-M-U` - M squash-merged candidates + U unmerged (prune workload)
 /// - `picker-test` - config for wt switch interactive picker testing
 pub fn parse_config(s: &str) -> Option<SetupConfig> {
@@ -1485,11 +1561,20 @@ pub fn parse_config(s: &str) -> Option<SetupConfig> {
         return Some(SetupConfig::Flat(config));
     }
 
-    if let Some((worktrees, branches)) = parse_pair(s, "mixed-") {
-        return Some(SetupConfig::Mixed {
-            worktrees,
-            branches,
-        });
+    if let Some(rest) = s.strip_prefix("mixed-") {
+        return match rest.split('-').collect::<Vec<_>>().as_slice() {
+            [w, b] => Some(SetupConfig::Mixed {
+                worktrees: w.parse().ok()?,
+                branches: b.parse().ok()?,
+                remote_refs: 0,
+            }),
+            [w, b, r] => Some(SetupConfig::Mixed {
+                worktrees: w.parse().ok()?,
+                branches: b.parse().ok()?,
+                remote_refs: r.parse().ok()?,
+            }),
+            _ => None,
+        };
     }
 
     if let Some((merged, unmerged)) = parse_pair(s, "prune-") {
@@ -1622,7 +1707,7 @@ mod tests {
         // Two full rotations of each 4-state cycle, so a state that collapsed
         // into its neighbour fails on both of its indices rather than one.
         const N: usize = 8;
-        let fixture = create_mixed_repo(N, N);
+        let fixture = create_mixed_repo(N, N, 0);
         let repo = fixture.path().to_path_buf();
         let main = capture_git(&repo, &["rev-parse", "main"]);
 
@@ -1872,13 +1957,13 @@ mod tests {
 
         // The two dimensions share no state, so covering each zero once spans
         // the contract — a both-zero repo just skips both loops.
-        let fixture = create_mixed_repo(3, 0);
+        let fixture = create_mixed_repo(3, 0, 0);
         let repo = fixture.path().to_path_buf();
         assert_eq!(refs(&repo, "refs/heads/br-*"), 0, "no branchless branches");
         assert_eq!(refs(&repo, "refs/heads/wt-*"), 3);
         assert_eq!(linked(&repo), 3);
 
-        let fixture = create_mixed_repo(0, 3);
+        let fixture = create_mixed_repo(0, 3, 0);
         let repo = fixture.path().to_path_buf();
         assert_eq!(refs(&repo, "refs/heads/br-*"), 3);
         assert_eq!(refs(&repo, "refs/heads/wt-*"), 0, "no worktree branches");

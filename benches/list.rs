@@ -297,7 +297,7 @@ fn bench_full(c: &mut Criterion) {
 
     for cache in CacheState::WARM_AND_COLD {
         group.bench_function(cache.label(), |b| {
-            let fixture = create_mixed_repo(worktrees, branches);
+            let fixture = create_mixed_repo(worktrees, branches, 0);
             run_benchmark(
                 b,
                 binary,
