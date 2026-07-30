@@ -13,9 +13,11 @@ use worktrunk::config::{
     ProjectConfig, UserConfig, default_system_config_path, require_config_path, system_config_path,
 };
 use worktrunk::git::remote_ref::azure::azure_devops_extension_installed;
-use worktrunk::git::{CiPlatform, ErrorExt, Repository};
+use worktrunk::git::{ErrorExt, ForgeKind, Repository};
 use worktrunk::path::format_path_for_display;
-use worktrunk::shell::{FileDetectionResult, Shell, ZSH_PROBE_FLAGS, scan_for_detection_details};
+use worktrunk::shell::{
+    FileDetectionResult, Shell, ZshStartupScope, probe_zsh_compdef, scan_for_detection_details,
+};
 use worktrunk::shell_exec::Cmd;
 use worktrunk::styling::{
     FormattedMessage, error_message, format_bash_with_gutter, format_heading, format_toml,
@@ -24,6 +26,7 @@ use worktrunk::styling::{
 
 use crate::cli::{SwitchFormat, version_str};
 use crate::commands::configure_shell::{ConfigAction, ConfigureResult, scan_shell_configs};
+use crate::commands::legacy_forge_alias_diagnostic;
 use crate::commands::list::ci_status::CiToolsStatus;
 use crate::help_pager::show_help_in_pager;
 use crate::llm::test_commit_generation;
@@ -260,75 +263,6 @@ pub(super) fn is_statusline_configured() -> bool {
         })
 }
 
-/// Get the git version string (e.g., "2.47.1")
-fn git_version() -> Option<String> {
-    let output = Cmd::new("git").arg("--version").run().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    // Parse "git version 2.47.1" -> "2.47.1"
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .trim()
-        .strip_prefix("git version ")
-        .map(|s| s.to_string())
-}
-
-/// Check if zsh has compinit enabled by spawning an interactive shell
-///
-/// Returns true if compinit is NOT enabled (i.e., user needs to add it).
-/// Returns false if compinit is enabled or we can't determine (fail-safe: don't warn).
-///
-// This remains separate from `shell::detect_zsh_compinit`: config show skips
-// global rcs, reads the exit status, and uses `Cmd`; shell setup sources global
-// rcs, reads marker output, and manages a raw `Command`.
-fn check_zsh_compinit_missing() -> bool {
-    // Allow tests to bypass this check since zsh subprocess behavior varies across CI envs
-    if std::env::var("WORKTRUNK_TEST_COMPINIT_CONFIGURED").is_ok() {
-        return false; // Assume compinit is configured
-    }
-
-    // Force compinit to be missing (for tests that expect the warning)
-    if std::env::var("WORKTRUNK_TEST_COMPINIT_MISSING").is_ok() {
-        return true; // Force warning to appear
-    }
-
-    // Probe zsh to check if compdef function exists (indicates compinit has run)
-    // Use --no-globalrcs to skip system files (like /etc/zshrc on macOS which enables compinit)
-    // This ensures we're checking the USER's configuration, not system defaults
-    // Suppress stderr to avoid noise like "can't change option: zle"
-    // The (( ... )) arithmetic returns exit 0 if true (compdef exists), 1 if false
-    // Suppress zsh's "insecure directories" warning from compinit.
-    // See detailed rationale in shell::detect_zsh_compinit().
-    //
-    // Bound the probe with a timeout that kills the child on expiry — the same
-    // hardening detect_zsh_compinit() relies on. An interactive `zsh -ic` whose
-    // startup prompts on /dev/tty (compinit's insecure-directories prompt
-    // bypasses both the stdin=null default and the stderr suppression above)
-    // would otherwise hang `wt config show` indefinitely. On timeout run()
-    // returns Err, so the `else` below declines to warn rather than misreport.
-    // `+m` disables job control so this interactive probe doesn't grab wt's
-    // controlling terminal. An interactive zsh with job control on `tcsetpgrp`s
-    // to claim the terminal foreground; if the 2s timeout kills it before it
-    // restores that, wt is left in a background process group and the pager
-    // spawned moments later (config show always pages) raises SIGTTOU,
-    // suspending the command (`suspended (tty output)`). See issue #3322.
-    let Ok(output) = Cmd::new("zsh")
-        .arg("--no-globalrcs")
-        .args(ZSH_PROBE_FLAGS)
-        .arg("(( $+functions[compdef] ))")
-        .env("ZSH_DISABLE_COMPFIX", "true")
-        .timeout(std::time::Duration::from_secs(2))
-        .run()
-    else {
-        return false; // Can't determine, don't warn
-    };
-
-    // compdef NOT found = need to warn
-    !output.status.success()
-}
-
 // ==================== Render Functions ====================
 
 /// Render CLAUDE CODE section (plugin and statusline status).
@@ -487,7 +421,7 @@ fn render_runtime_info(out: &mut String) -> anyhow::Result<()> {
         "{}",
         info_message(cformat!("{cmd}: <bold>{version}</>"))
     )?;
-    if let Some(git_version) = git_version() {
+    if let Ok(git_version) = crate::diagnostic::git_version() {
         writeln!(
             out,
             "{}",
@@ -519,7 +453,7 @@ fn render_diagnostics(out: &mut String) -> anyhow::Result<()> {
     // Check the CI tool for this repo's platform (project config, else remote URL).
     let repo = Repository::current()?;
     match repo.ci_platform(None) {
-        Some(CiPlatform::GitHub) => {
+        Some(ForgeKind::GitHub) => {
             let ci_tools = CiToolsStatus::detect(None);
             render_ci_tool_status(
                 out,
@@ -529,7 +463,7 @@ fn render_diagnostics(out: &mut String) -> anyhow::Result<()> {
                 ci_tools.gh_authenticated,
             )?;
         }
-        Some(CiPlatform::GitLab) => {
+        Some(ForgeKind::GitLab) => {
             let ci_tools = CiToolsStatus::detect(None);
             render_ci_tool_status(
                 out,
@@ -539,7 +473,7 @@ fn render_diagnostics(out: &mut String) -> anyhow::Result<()> {
                 ci_tools.glab_authenticated,
             )?;
         }
-        Some(CiPlatform::Gitea) => {
+        Some(ForgeKind::Gitea) => {
             let ci_tools = CiToolsStatus::detect(None);
             render_ci_tool_status(
                 out,
@@ -549,7 +483,7 @@ fn render_diagnostics(out: &mut String) -> anyhow::Result<()> {
                 ci_tools.tea_authenticated,
             )?;
         }
-        Some(CiPlatform::AzureDevOps) => {
+        Some(ForgeKind::AzureDevOps) => {
             let ci_tools = CiToolsStatus::detect(None);
             render_ci_tool_status(
                 out,
@@ -572,11 +506,21 @@ fn render_diagnostics(out: &mut String) -> anyhow::Result<()> {
             }
         }
         None => {
-            writeln!(
-                out,
-                "{}",
-                hint_message("CI status requires GitHub, GitLab, Gitea, or Azure DevOps remote")
-            )?;
+            if let Some(alias) = repo.legacy_forge_alias() {
+                writeln!(
+                    out,
+                    "{}",
+                    warning_message(legacy_forge_alias_diagnostic(&alias))
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "{}",
+                    hint_message(
+                        "CI status requires GitHub, GitLab, Gitea, or Azure DevOps remote"
+                    )
+                )?;
+            }
         }
     }
 
@@ -988,7 +932,7 @@ fn render_fish_legacy_migration(
 /// Zsh-only: warn when compinit isn't enabled, since the integration
 /// installs completions but they won't load without compinit.
 fn render_zsh_compinit_warning(out: &mut String) -> anyhow::Result<()> {
-    if !check_zsh_compinit_missing() {
+    if probe_zsh_compdef(ZshStartupScope::UserOnly) != Some(false) {
         return Ok(());
     }
     writeln!(
@@ -1629,17 +1573,6 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_get_git_version_returns_version() {
-        // In a normal environment with git installed, should return a version
-        let version = git_version();
-        assert!(version.is_some());
-        let version = version.unwrap();
-        // Version should look like a semver (e.g., "2.47.1")
-        assert!(version.chars().next().unwrap().is_ascii_digit());
-        assert!(version.contains('.'));
-    }
 
     #[test]
     fn test_is_newer_version() {

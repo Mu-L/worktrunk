@@ -2,6 +2,7 @@ use crate::common::{
     DAY, HOUR, MINUTE, TestRepo, list_snapshots, make_snapshot_cmd, repo, repo_with_remote,
     setup_snapshot_settings_for_paths, wt_command,
 };
+use insta::assert_snapshot;
 use insta_cmd::assert_cmd_snapshot;
 use rstest::rstest;
 
@@ -439,6 +440,51 @@ fn test_list_json_repo_url_from_ssh_remote(repo: TestRepo) {
     assert!(
         row["repo"].get("project").is_none(),
         "GitHub repo metadata should not include project"
+    );
+}
+
+/// CI collection reports the intentional exact-label compatibility break once,
+/// while an explicit forge platform resolves and suppresses the diagnostic.
+/// The statusline takes its separate silent collection path.
+#[rstest]
+fn test_list_ci_legacy_forge_alias_diagnostic(mut repo: TestRepo) {
+    repo.setup_mock_gh();
+    repo.run_git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "git@github-personal:owner/repo.git",
+    ]);
+
+    let output = repo.wt_command().args(["list", "--full"]).output().unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let alias_lines = stderr
+        .lines()
+        .filter(|line| line.contains("SSH host alias"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_snapshot!(alias_lines, @r#"[33m▲[39m [33mSSH host alias [1mgithub-personal[22m is not auto-detected as a forge; enable CI status and [1mwt switch --prs[22m with [1mforge.platform = "github"[22m @ [1m.config/wt.toml[22m[39m"#);
+
+    let statusline = repo
+        .wt_command()
+        .args(["list", "statusline", "--format=json"])
+        .output()
+        .unwrap();
+    assert!(statusline.status.success());
+    let statusline_stderr = String::from_utf8_lossy(&statusline.stderr);
+    assert!(
+        statusline_stderr.is_empty(),
+        "statusline must remain silent:\n{statusline_stderr}"
+    );
+
+    repo.write_project_config("[forge]\nplatform = \"github\"\n");
+    let configured = repo.wt_command().args(["list", "--full"]).output().unwrap();
+    assert!(configured.status.success());
+    let configured_stderr = String::from_utf8_lossy(&configured.stderr);
+    assert!(
+        !configured_stderr.contains("SSH host alias"),
+        "explicit forge config should suppress the diagnostic:\n{configured_stderr}"
     );
 }
 
