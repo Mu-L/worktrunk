@@ -1,6 +1,10 @@
 //! Gitea PR provider.
 //!
-//! Implements `RemoteRefProvider` for Gitea Pull Requests using the `tea` CLI.
+//! Implements `RemoteRefProvider` for Gitea Pull Requests using the `tea` CLI,
+//! and hosts the `tea`-facing helpers other modules share: [`api_error_message`]
+//! (how every caller separates a failed request from a resource),
+//! [`is_authed_for`], and [`has_any_login`] — read by the switch dispatcher and
+//! the CI-status backend, so a change to one of them is not local.
 //!
 //! ## API path resolution
 //!
@@ -55,8 +59,36 @@ struct TeaApiPrResponse {
 /// whenever the request fails.
 #[derive(Debug, Deserialize)]
 struct TeaApiErrorResponse {
-    #[serde(default)]
     message: String,
+}
+
+/// The message from Gitea's `APIError` body, or `None` when the response
+/// carries the resource.
+///
+/// `tea api` never reads the HTTP status — it copies the response body to
+/// stdout and exits 0 — so the body's *shape* is the only thing separating a
+/// failed request from a successful one, and the presence of a `message` key
+/// is that shape: none of the resources read here (a PR object, a PR array, a
+/// combined commit status) carries one.
+///
+/// The message's *content* is not part of the key. Gitea blanks a 500's
+/// message in production unless the token belongs to an admin, so that body
+/// arrives as `{"message":"","url":"…/api/swagger"}`; keying on a non-empty
+/// message would read it as the resource — a PR array that fails to parse, or
+/// a combined status whose fields all default to "no statuses".
+///
+/// `url` is not part of the key either, though `APIError` carries one: an error
+/// shape that omits it — Gitea has them, `APIInvalidTopicsError` being `message`
+/// plus `invalidTopics` — would read as the resource, the failure this key
+/// exists to prevent, while requiring it would only guard against a resource
+/// one day growing a `message` field.
+///
+/// Callers render the empty message themselves: what to say about an error the
+/// server won't describe depends on what the caller was doing.
+pub fn api_error_message(stdout: &[u8]) -> Option<String> {
+    serde_json::from_slice::<TeaApiErrorResponse>(stdout)
+        .ok()
+        .map(|error| error.message.trim().to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,28 +162,26 @@ fn fetch_pr_info(pr_number: u32, repo: &Repository) -> anyhow::Result<RemoteRefI
     // carrying Gitea's `APIError` body instead of the PR. The response shape
     // is what separates them, and it's the only thing that can: the status
     // code never reaches us, and Gitea's message doesn't spell it either.
-    let response: TeaApiPrResponse = match serde_json::from_slice(&output.stdout) {
-        Ok(response) => response,
-        Err(parse_error) => {
-            let api_error = serde_json::from_slice::<TeaApiErrorResponse>(&output.stdout)
-                .ok()
-                .filter(|e| !e.message.trim().is_empty());
-            if let Some(api_error) = api_error {
-                bail!(
-                    "Gitea API error for PR #{} on {}/{}: {}",
-                    pr_number,
-                    parsed.owner(),
-                    parsed.repo(),
-                    api_error.message.trim()
-                );
-            }
-            return Err(anyhow::Error::from(parse_error).context(format!(
-                "Failed to parse Gitea API response for PR #{}. \
-                 This may indicate a Gitea API change.",
-                pr_number
-            )));
+    if let Some(message) = api_error_message(&output.stdout) {
+        let (owner, repo_name) = (parsed.owner(), parsed.repo());
+        if message.is_empty() {
+            bail!(
+                "Gitea API error for PR #{pr_number} on {owner}/{repo_name}, but the response \
+                 carried no message — Gitea hides 500 messages from non-admin tokens"
+            );
         }
-    };
+        bail!("Gitea API error for PR #{pr_number} on {owner}/{repo_name}: {message}");
+    }
+
+    // Neither the resource nor an error envelope: report the parse failure,
+    // whose source names where the body diverged.
+    let response: TeaApiPrResponse = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "Failed to parse Gitea API response for PR #{}. \
+             This may indicate a Gitea API change.",
+            pr_number
+        )
+    })?;
 
     // Check head.repo before extract_source_branch so deleted-source PRs hit
     // the specific "source repository was deleted" message instead of falling
@@ -356,6 +386,36 @@ mod tests {
     fn test_ref_type() {
         let provider = GiteaProvider;
         assert_eq!(provider.ref_type(), crate::git::RefType::Pr);
+    }
+
+    /// The `APIError` envelope is recognized by the presence of a `message`
+    /// key, not by what the message says: a 500 whose message Gitea blanked
+    /// for a non-admin token is still an error, not a PR.
+    #[test]
+    fn test_api_error_message_reads_the_response_shape() {
+        let error = |body: &str| api_error_message(body.as_bytes());
+
+        assert_eq!(
+            error(
+                r#"{"errors":null,"message":"token is required","url":"https://gitea.example.com/api/swagger"}"#
+            ),
+            Some("token is required".to_string())
+        );
+        assert_eq!(
+            error(r#"{"message":"","url":"https://gitea.example.com/api/swagger"}"#),
+            Some(String::new())
+        );
+        assert_eq!(error(r#"{"message":"   "}"#), Some(String::new()));
+
+        // The resources read through `tea api` carry no `message`, so they
+        // stay data: a single PR, a PR array, a combined commit status.
+        assert_eq!(error(r#"{"title":"Fix login","state":"open"}"#), None);
+        assert_eq!(error("[]"), None);
+        assert_eq!(error(r#"{"state":"success","total_count":2}"#), None);
+
+        // Neither shape — the caller reports a parse failure, not an API error.
+        assert_eq!(error(r#"{"unexpected":1}"#), None);
+        assert_eq!(error("not json"), None);
     }
 
     #[test]

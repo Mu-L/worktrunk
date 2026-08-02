@@ -5475,6 +5475,43 @@ fn test_switch_pr_gitea_forbidden(#[from(repo_with_remote)] repo: TestRepo) {
     });
 }
 
+/// A 500 reaches the user as an API error, not as a parse failure. Gitea
+/// blanks the message of a 500 in production unless the token belongs to an
+/// admin, so the body arrives as the same `APIError` envelope with nothing in
+/// it — the shape still says the request failed, and the message says why
+/// there's no more to report.
+#[rstest]
+fn test_switch_pr_gitea_blank_error_message(#[from(repo_with_remote)] repo: TestRepo) {
+    repo.run_git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://gitea.example.com/owner/test-repo.git",
+    ]);
+
+    let mock_bin = repo.root_path().join("mock-bin");
+    fs::create_dir_all(&mock_bin).unwrap();
+    copy_mock_binary(&mock_bin, "tea");
+
+    MockConfig::new("tea")
+        .version("tea version development (mock)")
+        .command(
+            "api",
+            MockResponse::output(
+                r#"{"errors":null,"message":"","url":"https://gitea.example.com/api/swagger"}"#,
+            ),
+        )
+        .command("_default", MockResponse::exit(1))
+        .write(&mock_bin);
+
+    let settings = setup_snapshot_settings(&repo);
+    settings.bind(|| {
+        let mut cmd = make_snapshot_cmd(&repo, "switch", &["pr:101"], None);
+        configure_mock_cli_env(&mut cmd, &mock_bin);
+        assert_cmd_snapshot!("switch_pr_gitea_blank_error_message", cmd);
+    });
+}
+
 // ============================================================================
 // PR Syntax Tests on Azure DevOps remotes
 //
