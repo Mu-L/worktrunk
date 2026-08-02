@@ -1,10 +1,11 @@
 ---
-source: tests/integration_tests/switch.rs
+source: tests/integration_tests/approvals.rs
 info:
   program: wt
   args:
-    - switch
-    - "pr:101"
+    - config
+    - approvals
+    - clear
   env:
     APPDATA: "[TEST_CONFIG_HOME]"
     CLAUDE_CONFIG_DIR: "[TEST_CLAUDE_CONFIG]"
@@ -53,9 +54,10 @@ info:
     WORKTRUNK_TEST_ZSH_INSTALLED: "0"
     XDG_CONFIG_HOME: "[TEST_CONFIG_HOME]"
 ---
-success: false
-exit_code: 1
+success: true
+exit_code: 0
 ----- stdout -----
 
 ----- stderr -----
-[31m✗[39m [31mInvalid forge.platform value `bitbucket` (from `[forge]` in project config or a `[projects]` entry in user config); expected one of: github, gitlab, gitea, azure-devops[39m
+[32m✓[39m [32mCleared 1 approval for this project[39m
+[2m↳[22m [2mCommands approved by pattern entry [4m*[24m still apply; to change them, edit [TEST_APPROVALS]
