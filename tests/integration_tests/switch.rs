@@ -2350,9 +2350,7 @@ worktree-path = "{{ repo_path }}/../{{ branch | sanitize }}"
 // PR Syntax Tests (pr:<number>)
 // ============================================================================
 
-use crate::common::mock_commands::{
-    MockConfig, MockResponse, copy_mock_binary, tea_api_include_stderr,
-};
+use crate::common::mock_commands::{MockConfig, MockResponse, tea_api_include_stderr};
 
 /// Set origin to a GitHub URL so `fetch_pr_info` can parse owner/repo.
 ///
@@ -2826,30 +2824,24 @@ fn test_switch_prs_dry_run_empty_gitlab(repo: TestRepo) {
 /// - `head.ref`, `head.repo.owner.login`, `head.repo.name`
 /// - `base.repo.owner.login`, `base.repo.name`
 /// - `html_url`
-fn setup_mock_gh_for_pr(repo: &TestRepo, gh_response: Option<&str>) -> std::path::PathBuf {
+fn setup_mock_gh_for_pr(repo: &TestRepo, gh_response: &str) -> std::path::PathBuf {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    // Copy mock-stub binary as "gh"
-    copy_mock_binary(&mock_bin, "gh");
+    fs::write(mock_bin.join("pr_response.json"), gh_response).unwrap();
 
-    // Write PR response file if provided
-    if let Some(response) = gh_response {
-        fs::write(mock_bin.join("pr_response.json"), response).unwrap();
-
-        MockConfig::new("gh")
-            .version("gh version 2.0.0 (mock)")
-            .command("api", MockResponse::file("pr_response.json"))
-            .command("_default", MockResponse::exit(1))
-            .write(&mock_bin);
-    }
+    MockConfig::new("gh")
+        .version("gh version 2.0.0 (mock)")
+        .command("api", MockResponse::file("pr_response.json"))
+        .command("_default", MockResponse::exit(1))
+        .write(&mock_bin);
 
     mock_bin
 }
 
 /// Configure command environment for any mock CLI installed in `mock_bin`.
 ///
-/// Sets `WORKTRUNK_TEST_MOCK_CONFIG_DIR` (so mock-stub finds its config) and
+/// Sets `WORKTRUNK_TEST_MOCK_CONFIG_DIR` (so the mock playback finds its config) and
 /// prepends `mock_bin` to `PATH` (so the mock binary is found before any real
 /// CLI).
 fn configure_mock_cli_env(cmd: &mut std::process::Command, mock_bin: &Path) {
@@ -2903,7 +2895,7 @@ fn test_switch_pr_create_conflict(#[from(repo_with_remote)] repo: TestRepo) {
         "html_url": "https://github.com/owner/test-repo/pull/101"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -2959,7 +2951,7 @@ fn test_switch_pr_same_repo_custom_ssh_user(#[from(repo_with_remote)] mut repo: 
         "html_url": "https://github.com/owner/test-repo/pull/101"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -3029,7 +3021,7 @@ fn test_switch_pr_same_repo_limited_refspec(#[from(repo_with_remote)] mut repo: 
         "html_url": "https://github.com/owner/test-repo/pull/101"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -3074,7 +3066,7 @@ fn test_switch_pr_same_repo_no_remote(#[from(repo_with_remote)] repo: TestRepo) 
         "html_url": "https://github.com/owner/test-repo/pull/101"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -3159,7 +3151,7 @@ fn test_switch_pr_fork(#[from(repo_with_remote)] repo: TestRepo) {
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -3246,7 +3238,7 @@ post-switch = "echo 'pr_number={{ pr_number }} pr_url={{ pr_url }}' > {{ repo_pa
         },
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let mut cmd = repo.wt_command();
     cmd.args(["switch", "pr:42", "--yes"]);
@@ -3354,7 +3346,7 @@ fn test_switch_pr_reads_invoking_worktree_config(#[from(repo_with_remote)] repo:
         },
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     // (a) Without `--yes`: the approval prompt lists the *invoking* worktree's
     // hook (never the PR's), then bails (stdin is not a TTY in tests).
@@ -3442,7 +3434,7 @@ fn test_switch_pr_fork_no_upstream_remote(#[from(repo_with_remote)] repo: TestRe
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -3568,9 +3560,6 @@ fn test_switch_pr_not_found(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    // Copy mock-stub binary as "gh"
-    copy_mock_binary(&mock_bin, "gh");
-
     // Configure gh api to return error for PR not found (JSON on stdout, human-readable on stderr)
     MockConfig::new("gh")
         .version("gh version 2.0.0 (mock)")
@@ -3600,8 +3589,6 @@ fn test_switch_pr_not_found_gh_default(#[from(repo_with_remote)] repo: TestRepo)
     set_github_remote_url(&repo);
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    copy_mock_binary(&mock_bin, "gh");
 
     MockConfig::new("gh")
         .version("gh version 2.0.0 (mock)")
@@ -3669,7 +3656,6 @@ fn test_switch_pr_uses_nonprimary_github_remote(#[from(repo_with_remote)] mut re
 
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "gh");
     fs::write(
         mock_bin.join("pr_response.json"),
         r#"{
@@ -3729,7 +3715,7 @@ fn test_switch_pr_deleted_fork(#[from(repo_with_remote)] repo: TestRepo) {
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -3797,7 +3783,7 @@ fn test_switch_base_pr_same_repo(#[from(repo_with_remote)] mut repo: TestRepo) {
         "html_url": "https://github.com/owner/test-repo/pull/101"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -3869,7 +3855,7 @@ fn test_switch_base_pr_sets_upstream(#[from(repo_with_remote)] mut repo: TestRep
     }}"#
     );
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(&gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, &gh_response);
 
     let mut cmd = repo.wt_command();
     cmd.args([
@@ -3970,7 +3956,7 @@ fn test_switch_base_pr_fork(#[from(repo_with_remote)] repo: TestRepo) {
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let mut settings = setup_snapshot_settings(&repo);
     // Fork base resolves to a commit SHA (no tracking branch created). Mask it
@@ -4049,7 +4035,7 @@ fn test_switch_base_mr_same_repo(#[from(repo_with_remote)] mut repo: TestRepo) {
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/101"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -4120,7 +4106,7 @@ fn test_switch_pr_fork_existing_same_pr(#[from(repo_with_remote)] repo: TestRepo
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -4205,7 +4191,7 @@ fn test_switch_pr_fork_existing_different_pr(#[from(repo_with_remote)] repo: Tes
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -4291,7 +4277,7 @@ fn test_switch_pr_fork_existing_same_pr_wrong_remote(#[from(repo_with_remote)] m
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
     let mut cmd = make_snapshot_cmd(&repo, "switch", &["pr:42"], None);
     configure_mock_cli_env(&mut cmd, &mock_bin);
     let output = cmd.output().unwrap();
@@ -4372,7 +4358,7 @@ fn test_switch_pr_fork_existing_no_tracking(#[from(repo_with_remote)] repo: Test
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -4457,7 +4443,7 @@ fn test_switch_pr_fork_prefixed_exists_same_pr(#[from(repo_with_remote)] repo: T
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -4527,7 +4513,7 @@ fn test_switch_pr_fork_prefixed_exists_different_pr(#[from(repo_with_remote)] re
         "html_url": "https://github.com/owner/test-repo/pull/42"
     }"#;
 
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -4543,8 +4529,6 @@ fn test_switch_pr_not_authenticated(#[from(repo_with_remote)] repo: TestRepo) {
     set_github_remote_url(&repo);
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    copy_mock_binary(&mock_bin, "gh");
 
     // Configure gh api to return auth error (JSON on stdout, human-readable on stderr)
     MockConfig::new("gh")
@@ -4572,8 +4556,6 @@ fn test_switch_pr_rate_limit(#[from(repo_with_remote)] repo: TestRepo) {
     set_github_remote_url(&repo);
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    copy_mock_binary(&mock_bin, "gh");
 
     // Configure gh api to return rate limit error (JSON on stdout, human-readable on stderr)
     MockConfig::new("gh")
@@ -4604,8 +4586,6 @@ fn test_switch_pr_invalid_json(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    copy_mock_binary(&mock_bin, "gh");
-
     // Configure gh api to return invalid JSON
     MockConfig::new("gh")
         .version("gh version 2.0.0 (mock)")
@@ -4627,8 +4607,6 @@ fn test_switch_pr_network_error(#[from(repo_with_remote)] repo: TestRepo) {
     set_github_remote_url(&repo);
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    copy_mock_binary(&mock_bin, "gh");
 
     // Configure gh api to return network error (no JSON, just stderr for network failures)
     MockConfig::new("gh")
@@ -4655,8 +4633,6 @@ fn test_switch_pr_unknown_error(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    copy_mock_binary(&mock_bin, "gh");
-
     // Configure gh api to return an unrecognized multi-line error
     // (realistic errors from gh often include context on multiple lines)
     let error_message = "error: unexpected API response\n\
@@ -4682,8 +4658,6 @@ fn test_switch_pr_empty_branch(#[from(repo_with_remote)] repo: TestRepo) {
     set_github_remote_url(&repo);
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    copy_mock_binary(&mock_bin, "gh");
 
     // Configure gh to return valid JSON but with empty branch name (head.ref is "")
     let gh_response = r#"{
@@ -4736,7 +4710,6 @@ fn test_switch_pr_empty_branch(#[from(repo_with_remote)] repo: TestRepo) {
 fn setup_mock_tea(repo: &TestRepo, status: &str, body: &str) -> std::path::PathBuf {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "tea");
     fs::write(mock_bin.join("tea_pr_response.json"), body).unwrap();
 
     MockConfig::new("tea")
@@ -5257,7 +5230,7 @@ fn test_switch_pr_self_hosted_defaults_to_github(#[from(repo_with_remote)] mut r
         },
         "html_url": "https://forge.example.com/owner/test-repo/pull/101"
     }"#;
-    let mock_bin = setup_mock_gh_for_pr(&repo, Some(gh_response));
+    let mock_bin = setup_mock_gh_for_pr(&repo, gh_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -5301,7 +5274,6 @@ fn test_switch_pr_gitea_request_failed(#[from(repo_with_remote)] repo: TestRepo)
 
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "tea");
 
     MockConfig::new("tea")
         .version("tea version development (mock)")
@@ -5497,7 +5469,6 @@ fn test_switch_pr_gitea_no_status_line(#[from(repo_with_remote)] repo: TestRepo)
 
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "tea");
 
     // A complete PR body, so nothing but the absent status line can reject it.
     MockConfig::new("tea")
@@ -5579,21 +5550,17 @@ const AZ_EXTENSION_INSTALLED: &str = r#"[{"name": "azure-devops", "version": "1.
 ///
 /// Returns the path to the mock bin directory; pass it to
 /// `configure_mock_cli_env`.
-fn setup_mock_az(repo: &TestRepo, az_pr_response: Option<&str>) -> std::path::PathBuf {
+fn setup_mock_az(repo: &TestRepo, az_pr_response: &str) -> std::path::PathBuf {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    copy_mock_binary(&mock_bin, "az");
+    fs::write(mock_bin.join("az_pr_response.json"), az_pr_response).unwrap();
 
-    if let Some(response) = az_pr_response {
-        fs::write(mock_bin.join("az_pr_response.json"), response).unwrap();
-
-        MockConfig::new("az")
-            .version("azure-cli 2.60.0 (mock)")
-            .command("repos pr show", MockResponse::file("az_pr_response.json"))
-            .command("_default", MockResponse::exit(1))
-            .write(&mock_bin);
-    }
+    MockConfig::new("az")
+        .version("azure-cli 2.60.0 (mock)")
+        .command("repos pr show", MockResponse::file("az_pr_response.json"))
+        .command("_default", MockResponse::exit(1))
+        .write(&mock_bin);
 
     mock_bin
 }
@@ -5639,7 +5606,7 @@ fn test_switch_pr_azure_create_conflict(#[from(repo_with_remote)] repo: TestRepo
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -5689,7 +5656,7 @@ fn test_switch_pr_azure_same_repo(#[from(repo_with_remote)] mut repo: TestRepo) 
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -5723,7 +5690,7 @@ fn test_switch_pr_azure_project_name_with_spaces(#[from(repo_with_remote)] mut r
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -5762,7 +5729,7 @@ fn test_switch_pr_azure_web_url(#[from(repo_with_remote)] mut repo: TestRepo) {
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -5802,7 +5769,7 @@ fn test_switch_pr_azure_empty_source_branch(#[from(repo_with_remote)] repo: Test
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let output = {
         let mut cmd = repo.wt_command();
@@ -5847,7 +5814,7 @@ fn test_switch_pr_azure_visualstudio_host(#[from(repo_with_remote)] mut repo: Te
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -5904,7 +5871,7 @@ fn test_switch_pr_azure_fork(#[from(repo_with_remote)] repo: TestRepo) {
         }
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -5931,7 +5898,6 @@ fn test_switch_pr_azure_not_found(#[from(repo_with_remote)] repo: TestRepo) {
 
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "az");
 
     MockConfig::new("az")
         .version("azure-cli 2.60.0 (mock)")
@@ -6011,7 +5977,7 @@ fn test_switch_pr_azure_forge_platform(#[from(repo_with_remote)] repo: TestRepo)
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6032,7 +5998,7 @@ fn test_switch_pr_azure_invalid_json(#[from(repo_with_remote)] repo: TestRepo) {
         "https://dev.azure.com/myorg/myproject/_git/test-repo",
     ]);
 
-    let mock_bin = setup_mock_az(&repo, Some("not json {"));
+    let mock_bin = setup_mock_az(&repo, "not json {");
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6059,7 +6025,6 @@ fn test_switch_pr_azure_server_error(#[from(repo_with_remote)] repo: TestRepo) {
 
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "az");
 
     MockConfig::new("az")
         .version("azure-cli 2.60.0 (mock)")
@@ -6092,7 +6057,6 @@ fn test_switch_pr_azure_auth_error(#[from(repo_with_remote)] repo: TestRepo) {
 
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "az");
 
     MockConfig::new("az")
         .version("azure-cli 2.60.0 (mock)")
@@ -6132,7 +6096,6 @@ fn test_switch_pr_azure_extension_not_installed(#[from(repo_with_remote)] repo: 
 
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "az");
 
     MockConfig::new("az")
         .version("azure-cli 2.60.0 (mock)")
@@ -6187,7 +6150,7 @@ fn test_switch_pr_azure_org_undeterminable(#[from(repo_with_remote)] repo: TestR
         "forkSource": null
     }"#;
 
-    let mock_bin = setup_mock_az(&repo, Some(az_response));
+    let mock_bin = setup_mock_az(&repo, az_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6206,23 +6169,17 @@ fn test_switch_pr_azure_org_undeterminable(#[from(repo_with_remote)] repo: TestR
 /// The response should be in `glab api projects/:id/merge_requests/<number>` format:
 /// - `source_branch`, `source_project_id`, `target_project_id`
 /// - `web_url`
-fn setup_mock_glab_for_mr(repo: &TestRepo, glab_response: Option<&str>) -> std::path::PathBuf {
+fn setup_mock_glab_for_mr(repo: &TestRepo, glab_response: &str) -> std::path::PathBuf {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    // Copy mock-stub binary as "glab"
-    copy_mock_binary(&mock_bin, "glab");
+    fs::write(mock_bin.join("mr_response.json"), glab_response).unwrap();
 
-    // Write MR response file if provided
-    if let Some(response) = glab_response {
-        fs::write(mock_bin.join("mr_response.json"), response).unwrap();
-
-        MockConfig::new("glab")
-            .version("glab version 1.40.0 (mock)")
-            .command("api", MockResponse::file("mr_response.json"))
-            .command("_default", MockResponse::exit(1))
-            .write(&mock_bin);
-    }
+    MockConfig::new("glab")
+        .version("glab version 1.40.0 (mock)")
+        .command("api", MockResponse::file("mr_response.json"))
+        .command("_default", MockResponse::exit(1))
+        .write(&mock_bin);
 
     mock_bin
 }
@@ -6242,7 +6199,7 @@ fn test_switch_mr_create_conflict(#[from(repo_with_remote)] repo: TestRepo) {
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/101"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6307,7 +6264,7 @@ fn test_switch_mr_same_repo(#[from(repo_with_remote)] mut repo: TestRepo) {
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/101"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6372,7 +6329,7 @@ fn test_switch_mr_same_repo_limited_refspec(#[from(repo_with_remote)] mut repo: 
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/101"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6409,7 +6366,7 @@ fn test_switch_mr_same_repo_no_remote(#[from(repo_with_remote)] repo: TestRepo) 
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/101"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6433,7 +6390,7 @@ fn test_switch_mr_malformed_web_url_no_separator(#[from(repo_with_remote)] repo:
         "web_url": "https://gitlab.com/owner/test-repo/merge_requests/101"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6457,7 +6414,7 @@ fn test_switch_mr_malformed_web_url_no_project(#[from(repo_with_remote)] repo: T
         "web_url": "https://gitlab.com/-/merge_requests/101"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6472,9 +6429,6 @@ fn test_switch_mr_malformed_web_url_no_project(#[from(repo_with_remote)] repo: T
 fn test_switch_mr_not_found(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    // Copy mock-stub binary as "glab"
-    copy_mock_binary(&mock_bin, "glab");
 
     // Configure glab api to return 404 error (JSON on stdout, human-readable on
     // stderr — glab formats the API's own message as `glab: <message> (HTTP N)`)
@@ -6503,8 +6457,6 @@ fn test_switch_mr_not_authenticated(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    copy_mock_binary(&mock_bin, "glab");
-
     // Configure glab api to return 401 error (JSON on stdout, human-readable on
     // stderr — the shape a real `glab api` produces for a rejected token)
     MockConfig::new("glab")
@@ -6532,8 +6484,6 @@ fn test_switch_mr_invalid_json(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
 
-    copy_mock_binary(&mock_bin, "glab");
-
     // Configure glab api to return invalid JSON
     MockConfig::new("glab")
         .version("glab version 1.40.0 (mock)")
@@ -6554,8 +6504,6 @@ fn test_switch_mr_invalid_json(#[from(repo_with_remote)] repo: TestRepo) {
 fn test_switch_mr_empty_branch(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    copy_mock_binary(&mock_bin, "glab");
 
     // Configure glab api to return valid JSON but with empty branch name
     let glab_response = r#"{
@@ -6645,11 +6593,10 @@ fn test_switch_mr_fork(#[from(repo_with_remote)] repo: TestRepo) {
     ]);
 
     // Set up mock glab with separate responses for MR API and project APIs.
-    // The mock-stub supports compound keys like "api projects/456" to match
+    // Mock playback supports compound keys like "api projects/456" to match
     // different API paths.
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-    copy_mock_binary(&mock_bin, "glab");
 
     // MR API response (no nested project data - that comes from separate calls)
     let mr_response = r#"{
@@ -6775,7 +6722,7 @@ fn test_switch_mr_fork_existing_branch_tracks_mr(#[from(repo_with_remote)] repo:
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/42"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6825,7 +6772,7 @@ fn test_switch_mr_fork_existing_branch_tracks_different(#[from(repo_with_remote)
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/42"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6862,7 +6809,7 @@ fn test_switch_mr_fork_existing_no_tracking(#[from(repo_with_remote)] repo: Test
         "web_url": "https://gitlab.com/owner/test-repo/-/merge_requests/42"
     }"#;
 
-    let mock_bin = setup_mock_glab_for_mr(&repo, Some(glab_response));
+    let mock_bin = setup_mock_glab_for_mr(&repo, glab_response);
 
     let settings = setup_snapshot_settings(&repo);
     settings.bind(|| {
@@ -6877,8 +6824,6 @@ fn test_switch_mr_fork_existing_no_tracking(#[from(repo_with_remote)] repo: Test
 fn test_switch_mr_unknown_error(#[from(repo_with_remote)] repo: TestRepo) {
     let mock_bin = repo.root_path().join("mock-bin");
     fs::create_dir_all(&mock_bin).unwrap();
-
-    copy_mock_binary(&mock_bin, "glab");
 
     // Configure glab api to return an unknown error (non-JSON stderr, like network errors)
     MockConfig::new("glab")
