@@ -970,7 +970,21 @@ mod tests {
             }
             n
         };
+        // Arm the awaited `(row, mode)` — but first let every background fill
+        // still in flight land, while `awaiting` is a key none of them match.
+        // `on_skeleton` spawns a `LOCAL_GIT_MODES` precompute for this row,
+        // which ends at `PreviewOrchestrator::fill` → `notify_filled` and pokes
+        // the same unlabelled `Event::RunPreview` this oracle counts. (The
+        // `comments` fetch is the other producer in production; on this
+        // no-forge `TestRepo` it fills synchronously through `fill_external`,
+        // so it is never in flight here.) Left in flight, a fill for the one
+        // precompute key a later step also awaits (`WorkingTree`) pokes
+        // legitimately but lands after that step's drain — charged to the *next*
+        // step, which is the flake in #3725. Quiescing before each
+        // `note_awaiting` keeps every counted poke attributable to the
+        // `on_update` under test.
         let await_tab = |mode| {
+            handler.orchestrator.wait_for_idle();
             handler
                 .orchestrator
                 .notifier()
