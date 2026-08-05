@@ -218,6 +218,18 @@ When an issue is clearly a duplicate, close it after commenting. Use
 `gh issue close <number>` and tell the reporter: if they believe this was
 closed in error, they can let us know and we'll reopen it.
 
+### Check `--config-set` before calling a setting unpinnable
+
+`wt --config-set '<toml>'` overrides any user config key for one invocation,
+above both config files and `WORKTRUNK_SECTION__KEY` env vars ([inline config
+overrides](https://worktrunk.dev/config/#inline-config-overrides-config-set)).
+The resolver just reads `repo.config().<key>` and shows no sign of that layer,
+so before writing "there's no way to do X per invocation", ask whether X is a
+config key: the ask is usually already met, and the reply is a `--config-set`
+recipe plus a docs fix where the docs don't connect the flag to the setting.
+Pinning is all that covers — weigh the request's residual asks on their own
+merits.
+
 ### Suggesting Aliases for Niche Feature Requests
 
 worktrunk deliberately limits flag and config growth, so a `wt` alias is the
