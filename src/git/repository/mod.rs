@@ -605,13 +605,18 @@ pub fn resolve_input_path(path: impl AsRef<Path>) -> PathBuf {
 /// one sits beside the branch, yielding `docs/`, and the branch lookup then
 /// misses a branch that is right there.
 ///
-/// Applied where a raw token enters resolution — [`Repository::resolve_worktree`],
-/// [`Repository::resolve_target_branch`], and `plan_switch` — rather than
-/// inside the shortcut expander they each call first. Both halves of "try the
-/// branch, then try the path" have to see one token: each gates its path
-/// attempt on the resolved name still equalling the input, which is how it
-/// tells a shortcut rewrite from a literal, and a name stripped underneath
-/// that test would read as a rewrite.
+/// Applied in [`Repository::expand_selector`] — which every token the user
+/// typed reaches before resolution — and again in
+/// [`Repository::resolve_worktree`], so its `@` fast path tests the normalized
+/// token. A [`Selector`] built straight from [`Selector::rewritten_to`] skips
+/// it, correctly: a PR's head branch or a cached default branch was never a
+/// spelling anyone chose, so there is nothing to strip.
+///
+/// That normalization has one home at all is what [`Selector`] buys. While
+/// "may this token name a path?" was inferred by comparing an expansion's
+/// output against its input, stripping a separator underneath that comparison
+/// read as a rewrite and silently disabled the path arm — so each assembly of
+/// the ladder had to normalize for itself, or not normalize at all.
 ///
 /// A selector of nothing but separators is returned unchanged — `/` is the
 /// root directory, and the empty string names nothing at all.
