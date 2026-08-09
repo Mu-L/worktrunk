@@ -358,6 +358,7 @@ pub(super) struct RepoCache {
 /// Used by `resolve_worktree` to handle different resolution outcomes:
 /// - A worktree exists (with optional branch for detached HEAD)
 /// - Only a branch exists (no worktree)
+/// - The selector named a directory that holds no worktree
 #[derive(Debug, Clone)]
 pub enum ResolvedWorktree {
     /// A worktree was found
@@ -372,6 +373,82 @@ pub enum ResolvedWorktree {
         /// The branch name
         branch: String,
     },
+    /// The selector named a directory holding no worktree — the skeleton an
+    /// interrupted create or remove leaves behind.
+    ///
+    /// A verdict rather than a caller's job: every place that reports "no such
+    /// thing" has to say whether it was looking for a branch or a path, and
+    /// [`Repository::path_selector_directory`] owns the four tests that make the
+    /// claim safe. Returning it here is what keeps those tests from being
+    /// re-invoked, or forgotten, at each reporting site.
+    NoWorktreeAtPath {
+        /// The directory, resolved against `-C` but spelled as the selector did
+        path: PathBuf,
+    },
+}
+
+/// A worktree selector after normalization and expansion — the token to look
+/// up, plus whether it may still be tried as a *path*.
+///
+/// Every assembly of the resolution ladder needs that second fact, and each
+/// used to re-derive it by comparing an expansion's output against its input —
+/// `branch == name` in `resolve_worktree`, `target.branch == branch` in
+/// `plan_switch`, `target.filter(|t| *t == resolved)` in
+/// `target_worktree_at_path`, `resolved == base` in `resolve_base_ref`. Four
+/// copies of one string heuristic standing in for something the producing step
+/// knows outright, and a trap for any normalization applied underneath them:
+/// stripping `docs/` to `docs` reads as a rewrite and silently disables the
+/// path arm.
+///
+/// So the producers state it. A token nobody touched may name a path
+/// ([`Selector::literal`]). One an earlier step produced may not
+/// ([`Selector::rewritten_to`]) — a shortcut expansion, a `pr:`/`mr:` lookup, a
+/// stripped remote prefix, a default branch read from cache. Neither does one
+/// that names a branch by construction ([`Selector::branch_only`]), which is
+/// `wt switch --create <name>`: nothing rewrote the argument, but it names a
+/// branch that does not exist yet, so a directory sitting at that spelling is
+/// not what the user meant.
+#[derive(Debug, Clone)]
+pub struct Selector {
+    token: String,
+    may_name_path: bool,
+}
+
+impl Selector {
+    /// A token the user typed and nothing rewrote — the path arm applies.
+    pub fn literal(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            may_name_path: true,
+        }
+    }
+
+    /// A token some earlier step produced, so the literal argument is not what
+    /// this names and a path lookup would be a nonsense one.
+    pub fn rewritten_to(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            may_name_path: false,
+        }
+    }
+
+    /// Take the path arm off a token that names a branch by construction.
+    pub fn branch_only(self) -> Self {
+        Self {
+            may_name_path: false,
+            ..self
+        }
+    }
+
+    /// The name to look up.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Whether this token may still be tried as a worktree path.
+    pub fn names_a_path(&self) -> bool {
+        self.may_name_path
+    }
 }
 
 /// Global base path for repository operations, set by -C flag.
@@ -518,6 +595,29 @@ pub fn resolve_input_path(path: impl AsRef<Path>) -> PathBuf {
         Some(base) => base.join(path),
         None => path.into_owned(),
     }
+}
+
+/// A worktree selector with trailing path separators removed.
+///
+/// Git's ref format forbids a name ending in `/`, so a selector that does can
+/// only be a path spelling — and shell completion is how one usually arrives.
+/// `wt switch docs<tab>` completes against the *directory* `./docs` whenever
+/// one sits beside the branch, yielding `docs/`, and the branch lookup then
+/// misses a branch that is right there.
+///
+/// Applied where a raw token enters resolution — [`Repository::resolve_worktree`],
+/// [`Repository::resolve_target_branch`], and `plan_switch` — rather than
+/// inside the shortcut expander they each call first. Both halves of "try the
+/// branch, then try the path" have to see one token: each gates its path
+/// attempt on the resolved name still equalling the input, which is how it
+/// tells a shortcut rewrite from a literal, and a name stripped underneath
+/// that test would read as a rewrite.
+///
+/// A selector of nothing but separators is returned unchanged — `/` is the
+/// root directory, and the empty string names nothing at all.
+pub fn normalize_selector(name: &str) -> &str {
+    let trimmed = name.trim_end_matches(std::path::is_separator);
+    if trimmed.is_empty() { name } else { trimmed }
 }
 
 /// Repository state for git operations.
