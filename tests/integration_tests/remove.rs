@@ -44,9 +44,11 @@ fn test_remove_reap_no_processes(mut repo: TestRepo) {
 // `--reap` (experimental) with a real process running under the worktree: the
 // detached child is discovered and terminated before removal. Whether the
 // controlling-terminal guard reaps it depends on the test's own terminal
-// (none in CI → reaped; a TTY on a dev box → spared), so the assertion is
-// driven off the guard's verdict rather than assuming either — keeping the
-// found-processes path exercised in CI without becoming host-dependent.
+// (none in CI → reaped; a TTY on a dev box → spared), so the assertion
+// branches on that terminal — read directly from the session (`/dev/tty`),
+// the property the child inherits at spawn, not probed via a second
+// `lsof`/`ps` snapshot, which can transiently fail under suite load and
+// predict the branch `wt`'s own probe then contradicts.
 #[cfg(unix)]
 #[rstest]
 fn test_remove_reap_kills_process(mut repo: TestRepo) {
@@ -70,8 +72,10 @@ fn test_remove_reap_kills_process(mut repo: TestRepo) {
         .unwrap();
     let pid = child.id();
 
-    // Wait until lsof reports the child's cwd (fast, but not instant).
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Wait until lsof reports the child's cwd — fast when idle, but under
+    // suite load a single probe can burn its whole 5s in-process timeout, so
+    // the deadline is the suite's generous 60s presence-poll convention.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !reap::processes_under(&canonical)
         .iter()
         .any(|p| p.pid == pid)
@@ -83,10 +87,10 @@ fn test_remove_reap_kills_process(mut repo: TestRepo) {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // The guard reaps the child iff it holds no controlling terminal.
-    let will_reap = reap::collect_reapable(&canonical)
-        .iter()
-        .any(|p| p.pid == pid);
+    // The guard reaps the child iff it holds no controlling terminal — which
+    // it inherited from this process's session, so read the session directly:
+    // `/dev/tty` opens iff the session has a controlling terminal.
+    let will_reap = std::fs::File::open("/dev/tty").is_err();
 
     let run_remove = |repo: &TestRepo| {
         let output = repo
@@ -1908,12 +1912,8 @@ approved-commands = ["echo 'hook ran' > {}"]
     let _worktree_path = repo.add_worktree("feature-bg");
 
     // Remove in background mode (default)
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_wt"));
-    repo.configure_wt_cmd(&mut cmd);
-    cmd.current_dir(repo.root_path())
-        .args(["remove", "feature-bg"])
-        .output()
-        .unwrap();
+    let mut cmd = repo.wt_command();
+    cmd.args(["remove", "feature-bg"]).output().unwrap();
 
     // Wait for the hook to create the marker file
     wait_for_file(&marker_file);
@@ -2316,12 +2316,8 @@ approved-commands = ["echo 'hook ran' > {}"]
         .unwrap();
 
     // Remove the branch (no worktree)
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_wt"));
-    repo.configure_wt_cmd(&mut cmd);
-    cmd.current_dir(repo.root_path())
-        .args(["remove", "branch-only"])
-        .output()
-        .unwrap();
+    let mut cmd = repo.wt_command();
+    cmd.args(["remove", "branch-only"]).output().unwrap();
 
     // Marker file should NOT exist - pre-remove hooks only run for worktree removal
     assert!(
