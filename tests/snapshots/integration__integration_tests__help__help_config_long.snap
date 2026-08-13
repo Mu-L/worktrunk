@@ -35,6 +35,7 @@ info:
     WORKTRUNK_TEST_PARENT_SHELL: ""
     WORKTRUNK_TEST_POWERSHELL_ENV: "0"
     WORKTRUNK_TEST_POWERSHELL_INSTALLED: "0"
+    WORKTRUNK_TEST_PROBE_TIMEOUT_MS: "60000"
     WORKTRUNK_TEST_SKIP_URL_HEALTH_CHECK: "1"
     WORKTRUNK_TEST_ZSH_INSTALLED: "0"
 ---
@@ -361,7 +362,7 @@ User config can include a [2m[projects][0m table for project-specific settings
 
 Entries are keyed by project identifier — [2m<host>/<owner>/<repo>[0m derived from the primary remote URL (no [2m.git[0m suffix), or the canonical repo path when there is no remote. Run [2mwt config show[0m inside the repo to see the identifier for the current project; it appears in the [2mPROJECT CONFIG[0m section as [2mIdentifier: …[0m.
 
-Scalar values (like [2mworktree-path[0m) replace the global value; everything else (hooks, aliases, etc.) appends, global first.
+Scalar values (like [2mworktree-path[0m) replace the global value; everything else (hooks, aliases, etc.) appends, global first. See how the layers rank.
 
 [107m [0m [2m[36m[projects."github.com/user/repo"][0m
 [107m [0m [2mworktree-path = [0m[2m[32m".worktrees/{{ branch | sanitize }}"[0m
@@ -656,11 +657,26 @@ Override the LLM command in CI to use a mock:
 
 [1m[32mInline config overrides (--config-set)[0m
 
-[2m--config-set <toml>[0m overrides any user config key for a single invocation, with higher priority than both config files and [2mWORKTRUNK_[0m env vars. The value is a TOML fragment, so arrays and tables work directly; the flag is global (works before or after the subcommand), repeatable, and a later [2m--config-set[0m replaces an earlier one for the same key.
+[2m--config-set <toml>[0m overrides any user config key for a single invocation. The value is a TOML fragment, so arrays and tables work directly; the flag is global (works before or after the subcommand), repeatable, and a later [2m--config-set[0m replaces an earlier one for the same key.
 
 [107m [0m [2m[0m[2m[34mwt[0m[2m [0m[2m[36m--config-set[0m[2m list.full=true list[0m
 [107m [0m [2m[0m[2m[34mwt[0m[2m step copy-ignored [0m[2m[36m--config-set[0m[2m [0m[2m[32m'step.copy-ignored.exclude=["target", "dist"]'[0m
 
 This composes with aliases — an alias body can invoke [2mwt --config-set … <command>[0m to render a named view without changing the saved config.
+
+[1m[32mPrecedence[0m
+
+Sources closer to the invocation rank higher (user config above system config), and within a config file a project entry outranks the global key of the same name. So [2mworktree-path[0m comes from the first of these that sets it:
+
+1. [2m--config-set 'worktree-path = …'[0m
+2. [2mWORKTRUNK_WORKTREE_PATH[0m
+3. [2m[projects."github.com/owner/repo"][0m in the config file
+4. global [2mworktree-path[0m in the config file
+
+A [2m--config-set[0m that names a project entry is both the highest layer and the most specific key, so it beats the same flag's global key:
+
+[107m [0m [2m[0m[2m[34mwt[0m[2m [0m[2m[36m--config-set[0m[2m [0m[2m[32m'projects."github.com/owner/repo".worktree-path = "/tmp/scratch"'[0m[2m switch [0m[2m[36m--create[0m[2m feature[0m
+
+Hooks, aliases and [2mstep.copy-ignored.exclude[0m accumulate rather than replace, so an env-set hook and a project's hook both run.
 
 ----- stderr -----

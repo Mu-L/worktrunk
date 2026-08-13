@@ -2645,6 +2645,330 @@ fn test_try_parse_value() {
     );
 }
 
+// =========================================================================
+// merge_layer() — a layer's global keys vs the `[projects]` entries below
+// =========================================================================
+
+const PROJECT: &str = "github.com/owner/repo";
+
+/// A base table with one project entry carrying `body`.
+fn base_with_project(body: &str) -> toml::Table {
+    format!("[projects.\"{PROJECT}\"]\n{body}").parse().unwrap()
+}
+
+fn loaded(table: toml::Table) -> UserConfig {
+    toml::Value::Table(table).try_into().unwrap()
+}
+
+#[test]
+fn test_cli_layer_outranks_project_worktree_path() {
+    // The reported bug (#3788), on the `--config-set` half: a project entry's
+    // `worktree-path` no longer beats a global key a higher layer set.
+    let base = base_with_project("worktree-path = \"/from-project\"\n");
+    let (table, warnings) = apply_overrides(base, &["worktree-path = \"/from-cli\""]);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        loaded(table).worktree_path_for_project(PROJECT),
+        "/from-cli"
+    );
+}
+
+#[test]
+fn test_env_layer_outranks_project_worktree_path() {
+    // The env half of the same fix, driven through the overlay
+    // `load_with_warnings` builds rather than the process environment.
+    use super::{EnvVar, migrate_env_overlay, resolve_env_overlay, try_parse_value};
+    let var = EnvVar {
+        name: "WORKTRUNK_WORKTREE_PATH".to_string(),
+        segments: vec!["worktree-path".to_string()],
+        typed_value: try_parse_value("/from-env"),
+        raw_value: "/from-env".to_string(),
+    };
+    let mut table = base_with_project("worktree-path = \"/from-project\"\n");
+    let overlay = migrate_env_overlay(resolve_env_overlay(&table, &[var]));
+    merge_layer(&mut table, overlay);
+
+    assert_eq!(
+        loaded(table).worktree_path_for_project(PROJECT),
+        "/from-env"
+    );
+}
+
+#[test]
+fn test_layer_keeps_an_already_invalid_candidate_untouched() {
+    // The pass discards a candidate that does not deserialize and validate.
+    // Step 3's env probe only deserializes, so an empty `worktree-path` from
+    // the environment reaches here already invalid — and the removals are
+    // dropped rather than handed to `finalize`, which would answer the same
+    // failure by wiping the config to defaults.
+    use super::{EnvVar, migrate_env_overlay, resolve_env_overlay, try_parse_value};
+    let empty_path = |value: &str| EnvVar {
+        name: "WORKTRUNK_WORKTREE_PATH".to_string(),
+        segments: vec!["worktree-path".to_string()],
+        typed_value: try_parse_value(value),
+        raw_value: value.to_string(),
+    };
+    let plain_merge = |overlay: &toml::Table| {
+        let mut plain = base_with_project("worktree-path = \"/from-project\"\n");
+        deep_merge_table(&mut plain, overlay.clone());
+        plain
+    };
+
+    let mut table = base_with_project("worktree-path = \"/from-project\"\n");
+    let overlay = migrate_env_overlay(resolve_env_overlay(&table, &[empty_path("")]));
+    let plain = plain_merge(&overlay);
+    merge_layer(&mut table, overlay);
+    assert_eq!(
+        table, plain,
+        "the removals are discarded as a unit, and the layer still applies"
+    );
+
+    // Control: the same overlay with a valid value does remove the project's
+    // key, so the assertion above is the discard and not a pass that found
+    // nothing to do.
+    let mut table = base_with_project("worktree-path = \"/from-project\"\n");
+    let overlay = migrate_env_overlay(resolve_env_overlay(&table, &[empty_path("/from-env")]));
+    let plain = plain_merge(&overlay);
+    merge_layer(&mut table, overlay);
+    assert_ne!(table, plain);
+}
+
+#[test]
+fn test_file_layer_outranks_lower_layer_project_entry() {
+    // The same rule where neither layer is an invocation one: the user file's
+    // global key answers for a project the system file keyed an entry to.
+    let mut table = base_with_project("worktree-path = \"/from-system-project\"\n");
+    merge_layer(
+        &mut table,
+        "worktree-path = \"/from-user-global\"\n".parse().unwrap(),
+    );
+
+    assert_eq!(
+        loaded(table).worktree_path_for_project(PROJECT),
+        "/from-user-global"
+    );
+}
+
+#[test]
+fn test_layer_leaves_untouched_project_keys() {
+    // Only the overridden key is displaced: a project entry's other settings,
+    // and its sibling keys inside the same section, still apply.
+    let base = base_with_project(
+        r#"worktree-path = "/from-project"
+
+[projects."github.com/owner/repo".list]
+full = true
+branches = true
+"#,
+    );
+    let (table, warnings) = apply_overrides(base, &["list.full = false"]);
+    assert!(warnings.is_empty());
+    let config = loaded(table);
+    assert_eq!(config.worktree_path_for_project(PROJECT), "/from-project");
+    let list = config.list(Some(PROJECT));
+    assert_eq!(list.full, Some(false), "the higher layer wins");
+    assert_eq!(list.branches, Some(true), "sibling key survives");
+}
+
+#[test]
+fn test_layer_keeps_its_own_project_scoped_override() {
+    // Naming the project entry is both the highest layer and the most
+    // specific key, so it outranks the same layer's global key.
+    let base = base_with_project("worktree-path = \"/from-project\"\n");
+    let (table, warnings) = apply_overrides(
+        base,
+        &[
+            "worktree-path = \"/from-cli-global\"",
+            &format!("projects.\"{PROJECT}\".worktree-path = \"/from-cli-project\""),
+        ],
+    );
+    assert!(warnings.is_empty());
+    assert_eq!(
+        loaded(table).worktree_path_for_project(PROJECT),
+        "/from-cli-project"
+    );
+}
+
+#[test]
+fn test_layer_applies_to_pattern_entries() {
+    // Pattern entries are project entries too — a `*` key must not smuggle a
+    // project-scoped value past a higher layer.
+    let base: toml::Table = "[projects.\"github.com/*\"]\nworktree-path = \"/from-pattern\"\n"
+        .parse()
+        .unwrap();
+    let (table, warnings) = apply_overrides(base, &["worktree-path = \"/from-cli\""]);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        loaded(table).worktree_path_for_project(PROJECT),
+        "/from-cli"
+    );
+}
+
+#[test]
+fn test_layer_leaves_composing_keys_alone() {
+    // Per-project hooks, aliases and copy-ignored excludes append to the
+    // global ones rather than replacing them, so both already apply and there
+    // is no precedence to fix. Dropping the project's copy would silently stop
+    // it applying.
+    let base = base_with_project(
+        r#"pre-merge = "project-hook"
+
+[projects."github.com/owner/repo".aliases]
+ship = "project-alias"
+
+[projects."github.com/owner/repo".step.copy-ignored]
+exclude = ["project-pattern"]
+"#,
+    );
+    let (table, warnings) = apply_overrides(
+        base,
+        &[
+            "pre-merge = \"cli-hook\"",
+            "aliases.ship = \"cli-alias\"",
+            "step.copy-ignored.exclude = [\"cli-pattern\"]",
+        ],
+    );
+    assert!(warnings.is_empty());
+    let config = loaded(table);
+    let templates = |commands: &CommandConfig| {
+        commands
+            .commands()
+            .map(|command| command.template.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        templates(&config.hooks(Some(PROJECT)).pre_merge.unwrap()),
+        ["cli-hook", "project-hook"]
+    );
+    assert_eq!(
+        templates(&config.aliases(Some(PROJECT))["ship"]),
+        ["cli-alias", "project-alias"]
+    );
+    assert_eq!(
+        config.copy_ignored(Some(PROJECT)).exclude,
+        ["cli-pattern", "project-pattern"]
+    );
+}
+
+#[test]
+fn test_layer_displaces_whole_custom_column() {
+    // `[list.custom-columns]` merges per column, so an override of one leaf
+    // has to displace the whole column: leaving the rest of the project's
+    // column would let it replace the global one wholesale anyway, and
+    // `template` is required — a column stripped of it stops deserializing,
+    // which would cost the user their whole config rather than one entry.
+    let base = base_with_project(
+        r#"[projects."github.com/owner/repo".list.custom-columns.Ticket]
+template = "{{ vars.ticket }}"
+width = 30
+"#,
+    );
+    let (table, warnings) = apply_overrides(
+        base,
+        &["list.custom-columns.Ticket.template = \"from-cli\""],
+    );
+    assert!(warnings.is_empty());
+    let column = loaded(table).list(Some(PROJECT)).custom_columns["Ticket"].clone();
+    assert_eq!(column.template, "from-cli");
+    assert_eq!(column.width, None, "the column went as a unit");
+
+    // Restating the column at project scope wins, as for any other key — and
+    // states the whole column, since the layer's global already displaced the
+    // one below it. A column is the unit on both sides of the boundary, so
+    // `width` is not carried over from the entry that was displaced.
+    let base = base_with_project(
+        r#"[projects."github.com/owner/repo".list.custom-columns.Ticket]
+template = "{{ vars.ticket }}"
+width = 30
+"#,
+    );
+    let (table, warnings) = apply_overrides(
+        base,
+        &[
+            "list.custom-columns.Ticket.template = \"from-cli\"",
+            &format!(
+                "projects.\"{PROJECT}\".list.custom-columns.Ticket.template = \"from-cli-project\""
+            ),
+        ],
+    );
+    assert!(warnings.is_empty());
+    let column = loaded(table).list(Some(PROJECT)).custom_columns["Ticket"].clone();
+    assert_eq!(column.template, "from-cli-project");
+    assert_eq!(column.width, None, "the column went as a unit here too");
+}
+
+#[test]
+fn test_layer_displaces_exclusive_sibling() {
+    // Each `[commit.generation]` pair clears itself, so overriding one member
+    // has to displace both at project scope: leaving the project's partner
+    // would let it win the merge, and it would fail validation next to the
+    // global key the same entry now answers with.
+    let pairs = [
+        ("template", "template-file"),
+        ("template-file", "template"),
+        ("squash-template", "squash-template-file"),
+        ("squash-template-file", "squash-template"),
+    ];
+    for (overridden, partner) in pairs {
+        let base = base_with_project(&format!(
+            "[projects.\"{PROJECT}\".commit.generation]\n{partner} = \"/project.txt\"\n"
+        ));
+        let (table, warnings) = apply_overrides(
+            base,
+            &[&format!("commit.generation.{overridden} = \"from-cli\"")],
+        );
+        assert!(warnings.is_empty(), "{overridden}: {warnings:?}");
+        let config = loaded(table);
+        config
+            .validate()
+            .unwrap_or_else(|e| panic!("{overridden}: {e}"));
+        let generation = config.commit_generation(Some(PROJECT));
+        let value = |key: &str| match key {
+            "template" => generation.template.as_deref(),
+            "template-file" => generation.template_file.as_deref(),
+            "squash-template" => generation.squash_template.as_deref(),
+            _ => generation.squash_template_file.as_deref(),
+        };
+        assert_eq!(value(overridden), Some("from-cli"), "{overridden}");
+        assert_eq!(value(partner), None, "{overridden} should clear {partner}");
+    }
+
+    // A `[commit.generation]` key that is in no pair displaces only itself.
+    let base = base_with_project(&format!(
+        "[projects.\"{PROJECT}\".commit.generation]\ncommand = \"project-llm\"\ntemplate-file = \"/project.txt\"\n"
+    ));
+    let (table, warnings) = apply_overrides(base, &["commit.generation.command = \"cli-llm\""]);
+    assert!(warnings.is_empty());
+    let generation = loaded(table).commit_generation(Some(PROJECT));
+    assert_eq!(generation.command.as_deref(), Some("cli-llm"));
+    assert_eq!(generation.template_file.as_deref(), Some("/project.txt"));
+}
+
+#[test]
+fn test_layer_noop_without_overrides() {
+    // No higher layer, no change: a project entry keeps every key.
+    let base = base_with_project("worktree-path = \"/from-project\"\n");
+    let (table, warnings) = apply_overrides(base, &[]);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        loaded(table).worktree_path_for_project(PROJECT),
+        "/from-project"
+    );
+}
+
+#[test]
+fn test_dropped_layer_leaves_projects_intact() {
+    // A `--config-set` layer that rolls back (malformed fragment) overrides
+    // nothing, so it must not displace the project entry either.
+    let base = base_with_project("worktree-path = \"/from-project\"\n");
+    let (table, warnings) = apply_overrides(base, &["worktree-path = \"/from-cli\"", "garbage"]);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        loaded(table).worktree_path_for_project(PROJECT),
+        "/from-project"
+    );
+}
+
 #[test]
 fn test_env_overlay_migrates_deprecated_key() {
     use super::{EnvVar, migrate_env_overlay, resolve_env_overlay, try_parse_value};
