@@ -2219,3 +2219,178 @@ printf '%s\n%s\n%s' '--custom-flag' '--another' "retired:${WORKTRUNK_DIRECTIVE_F
         "the retired directive file must remain untouched"
     );
 }
+
+/// Regression for #3816: `config shell init --cmd <name>` must generate a
+/// completion loader whose clap-derived identifiers match the ones the binary
+/// emits at TAB time.
+///
+/// The loader is lazy — the first TAB evals `COMPLETE=<shell> <binary>` and
+/// then calls clap's completer function. clap derives that function's name
+/// from its own `Command` name, so before the fix the loader guarded on and
+/// called `_clap_complete_wot` while the eval only ever defined
+/// `_clap_complete_wt`: nothing completed, and because the guard never became
+/// true the script was re-generated and re-evaluated on every TAB.
+///
+/// Driven through a real bash so the whole chain is exercised: init output →
+/// loader function → eval → clap's completer must exist afterwards.
+#[cfg(unix)]
+#[rstest]
+#[case("wot", "_clap_complete_wot")]
+// A `-` is not valid in a clap-escaped function name, so the documented
+// `--cmd=git-wt` case needs the same `-` → `_` escaping clap applies.
+#[case("git-wt", "_clap_complete_git_wt")]
+fn test_init_custom_cmd_defines_clap_completer_in_bash(
+    #[case] cmd_name: &str,
+    #[case] clap_fn: &str,
+) {
+    let wt = crate::common::wt_bin();
+    let wt = wt.to_str().unwrap();
+    let script = format!(
+        r#"export WORKTRUNK_BIN="{wt}"
+eval "$("{wt}" config shell init bash --cmd {cmd_name})"
+COMP_WORDS=({cmd_name} ""); COMP_CWORD=1
+_{cmd_name}_lazy_complete {cmd_name} "" {cmd_name} >/dev/null 2>&1
+declare -F {clap_fn} >/dev/null && echo DEFINED || echo MISSING
+"#
+    );
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("DEFINED"),
+        "`--cmd {cmd_name}` loader must define {clap_fn} after its lazy eval, got:\n{stdout}\n----- stderr -----\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Companion to the bash end-to-end test above, for the shells that can't be
+/// driven from CI. The registration the binary emits must name the command the
+/// shell integration was generated for, not clap's own `wt`.
+///
+/// zsh's registration also ends with `compdef <completer> <cmd>`, which binds
+/// worktrunk's completer to whatever name it carries — with clap's `wt` that
+/// hijacked completions for the *other* `wt` on PATH, the exact conflict
+/// `--cmd` exists to avoid.
+#[rstest]
+#[case(
+    "zsh",
+    "wot",
+    "_clap_dynamic_completer_wot",
+    "compdef _clap_dynamic_completer_wot wot"
+)]
+#[case(
+    "zsh",
+    "git-wt",
+    "_clap_dynamic_completer_git_wt",
+    "compdef _clap_dynamic_completer_git_wt git-wt"
+)]
+#[case("bash", "wot", "_clap_complete_wot", "-F _clap_complete_wot wot")]
+#[case("powershell", "wot", "Register-ArgumentCompleter", "-CommandName wot")]
+fn test_completion_registration_uses_shell_integration_cmd_name(
+    #[case] shell: &str,
+    #[case] cmd_name: &str,
+    #[case] completer_fn: &str,
+    #[case] registration: &str,
+) {
+    // The generated init script must reference the same identifier…
+    let init = wt_command()
+        .args(["config", "shell", "init", shell, "--cmd", cmd_name])
+        .output()
+        .unwrap();
+    let init_stdout = String::from_utf8_lossy(&init.stdout);
+    if shell != "powershell" {
+        assert!(
+            init_stdout.contains(completer_fn),
+            "{shell}: init --cmd {cmd_name} should reference {completer_fn}, got:\n{init_stdout}"
+        );
+    }
+
+    // …that the binary actually defines when the loader evals it.
+    let output = wt_command()
+        .env("COMPLETE", shell)
+        .env("WORKTRUNK_COMPLETE_NAME", cmd_name)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains(completer_fn),
+        "{shell}: registration should define {completer_fn}, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(registration),
+        "{shell}: registration should bind via `{registration}`, got:\n{stdout}"
+    );
+}
+
+/// `WORKTRUNK_COMPLETE_NAME` lands verbatim in generated shell code, so it is
+/// validated before it gets there. wt's own shell integration only ever sets it
+/// to a name `--cmd` already validated; a value outside the allowlist means
+/// something else set it, and the registration falls back to the binary name
+/// rather than emitting an unusable — or injected — identifier.
+#[rstest]
+#[case("wt; rm -rf /")]
+#[case("wt$(id)")]
+#[case("git wt")]
+#[case("-wt")]
+#[case("")]
+fn test_completion_registration_rejects_invalid_complete_name(#[case] name: &str) {
+    let output = wt_command()
+        .env("COMPLETE", "bash")
+        .env("WORKTRUNK_COMPLETE_NAME", name)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("-F _clap_complete_wt wt"),
+        "an invalid WORKTRUNK_COMPLETE_NAME ({name:?}) must fall back to the binary name, got:\n{stdout}"
+    );
+    assert!(
+        name.is_empty() || !stdout.contains(name),
+        "a rejected WORKTRUNK_COMPLETE_NAME ({name:?}) must not reach the generated script:\n{stdout}"
+    );
+}
+
+/// The binary-name fallback is validated for the same reason the env var is:
+/// it is `argv[0]`'s file stem, which no `--cmd` gate has seen. A binary
+/// installed under a name outside the allowlist would otherwise register
+/// `complete -F _clap_complete_<name>` with an identifier bash can't parse, so
+/// the last resort is the compile-time `wt`.
+///
+/// Unix-only because it needs a symlink named for the invalid case; the
+/// validation itself is platform-independent.
+#[cfg(unix)]
+#[rstest]
+fn test_completion_registration_falls_back_when_binary_name_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("wt+odd");
+    std::os::unix::fs::symlink(crate::common::wt_bin(), &link).unwrap();
+
+    // Borrow the isolated environment `wt_command` sets up — only the program
+    // itself differs, and `Command` can't have its program swapped.
+    let template = wt_command();
+    let mut cmd = std::process::Command::new(&link);
+    for (key, value) in template.get_envs() {
+        match value {
+            Some(value) => cmd.env(key, value),
+            None => cmd.env_remove(key),
+        };
+    }
+    if let Some(cwd) = template.get_current_dir() {
+        cmd.current_dir(cwd);
+    }
+
+    let output = cmd.env("COMPLETE", "bash").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("-F _clap_complete_wt wt"),
+        "an invalid binary name must fall back to `wt`, got:\n{stdout}"
+    );
+}

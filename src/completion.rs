@@ -88,9 +88,20 @@ pub(crate) fn maybe_handle_env_completion() -> bool {
 
     // If no args after `--`, output the shell registration script
     if args.is_empty() {
-        // Use CompleteEnv for registration script generation
+        // Use CompleteEnv for registration script generation, under the name the
+        // shell integration binds — not clap's own (see `registration_name`).
+        //
+        // A bare `Command` is all the registration needs: clap_complete 4.6.9's
+        // `write_registration` reads `cmd.get_name()` and `self.bin` (set below,
+        // so its `cmd.get_bin_name()` fallback never fires), and nothing else off
+        // the command. Handing it `completion_command()` instead would build the
+        // whole completion tree — `Repository::current()`, both config loads, and
+        // a scan of every `PATH` directory for `wt-*` — to produce one string, on
+        // the first TAB of every new shell.
+        let name = registration_name();
         let all_args: Vec<OsString> = std::env::args_os().collect();
-        let _ = CompleteEnv::with_factory(completion_command)
+        let _ = CompleteEnv::with_factory(move || Command::new(name))
+            .bin(name)
             .try_complete(all_args, current_dir.as_deref());
         CONTEXT.with(|ctx| ctx.borrow_mut().take());
         return true;
@@ -487,6 +498,48 @@ fn detect_hook_type(ctx: &CompletionContext) -> Option<&'static str> {
 // branch completion when creating a new worktree (since the branch doesn't exist yet).
 thread_local! {
     static CONTEXT: RefCell<Option<CompletionContext>> = const { RefCell::new(None) };
+}
+
+/// The command name the registration script binds completions to.
+///
+/// clap derives every identifier in that script — the completer function name,
+/// zsh's trailing `compdef`, bash's `complete -F`, PowerShell's
+/// `Register-ArgumentCompleter -CommandName` — from its own `Command` name,
+/// which is the compile-time `wt`. The shell integration can be generated for a
+/// different name (`wt config shell init --cmd git-wt`, or a binary installed
+/// under another name), and then the generated loader guards on and calls a
+/// function the registration never defines: nothing completes, and since the
+/// guard never becomes true the script is regenerated on every TAB (#3816).
+/// zsh's trailing `compdef` is worse than inert — it hands worktrunk's
+/// completer to whatever name it carries, i.e. to the *other* `wt` that
+/// `--cmd` exists to step around.
+///
+/// So the generated loader passes the name it bound in `WORKTRUNK_COMPLETE_NAME`
+/// and the registration is emitted under that name. The fallback is
+/// [`crate::binary_name`], which covers a binary installed as `git-wt` and
+/// invoked directly.
+///
+/// Both arms are validated, because both end up embedded verbatim in generated
+/// shell code and neither has necessarily been through the `--cmd` gate:
+/// `binary_name` is `argv[0]`'s file stem, so a binary installed under a name
+/// outside the allowlist would otherwise emit `complete -F _clap_complete_<name>`
+/// with an identifier the shell can't parse — completions would silently do
+/// nothing rather than fall back. `handle_completions` in `src/commands/init.rs`
+/// validates `binary_name` for the same reason before writing a registration.
+/// A rejected env var still defers to the binary name, which is the more useful
+/// answer than the constant; only a binary name that also fails lands on `wt`.
+///
+/// Leaked because `Command::name` takes a `clap::builder::Str`, which borrows
+/// unless clap's `string` feature is on — the same trade `build_hook_completion_command`
+/// makes. One small allocation in a process that writes the script and exits.
+fn registration_name() -> &'static str {
+    let is_valid = |name: &String| worktrunk::shell::validate_shell_command_name(name).is_ok();
+    let name = std::env::var("WORKTRUNK_COMPLETE_NAME")
+        .ok()
+        .filter(is_valid)
+        .or_else(|| Some(crate::binary_name()).filter(is_valid))
+        .unwrap_or_else(|| "wt".to_string());
+    Box::leak(name.into_boxed_str())
 }
 
 fn completion_command() -> Command {
