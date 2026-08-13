@@ -2589,7 +2589,7 @@ mod tests {
             .args([
                 "config",
                 "worktrunk.state.main.vars.config",
-                r#"{"port": 3000, "debug": true}"#,
+                r#"{"port": 3000, "debug": true, "note": null}"#,
             ])
             .current_dir(test.path())
             .run()
@@ -2628,9 +2628,9 @@ mod tests {
             .unwrap(),
             "3000"
         );
-        // A JSON bool reaches minijinja as a real bool, so it renders the way
-        // minijinja renders bools: `True`/`False` since 2.22, which adopted
-        // Jinja2's spelling.
+        // A JSON bool or null reaches minijinja as a real bool/none, so each
+        // renders the way minijinja renders it: `True`/`False`/`None` since
+        // 2.22, which adopted Jinja2's spelling for all three together.
         assert_eq!(
             expand_template(
                 "{{ vars.config.debug }}",
@@ -2641,6 +2641,17 @@ mod tests {
             )
             .unwrap(),
             "True"
+        );
+        assert_eq!(
+            expand_template(
+                "{{ vars.config.note }}",
+                &vars,
+                ShellEscapeMode::Literal,
+                &test.repo,
+                "test"
+            )
+            .unwrap(),
+            "None"
         );
 
         // Array index access
