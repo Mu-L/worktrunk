@@ -610,21 +610,34 @@ pub enum GitError {
     WorktreeNotFoundAtPath {
         path: PathBuf,
     },
-    /// A registered worktree's path that some *other* repository now occupies.
+    /// A registered worktree's path that something else now occupies: another
+    /// repository, or a sibling worktree of this one moved onto the path.
     ///
     /// The registration still resolves and the directory is still there, so
-    /// every check short of asking who owns it passes — including the
-    /// dirty-worktree gate, which reads the occupant's `git status` and
-    /// reports it as this worktree's. Removal is the operation that has to
-    /// care: the directory holds someone else's work, and possibly the only
-    /// copy of their objects.
+    /// every check short of asking what the directory points at passes —
+    /// including the dirty-worktree gate, which reads the occupant's `git
+    /// status` and reports it as this worktree's. Removal is the operation that
+    /// has to care: the directory holds work this registration cannot account
+    /// for, and possibly the only copy of its objects.
     ///
-    /// git refuses the same removal (`validation failed … is not a .git
-    /// file`), `--force` included. Worktrunk's fast path renames the directory
-    /// itself rather than asking git to, so it has to make this check for
-    /// itself — see `ensure_belongs_to_repo`.
+    /// git refuses the same removal (`validation failed … does not point back
+    /// to '.git/worktrees/<id>'`), `--force` included. Worktrunk's fast path
+    /// renames the directory itself rather than asking git to, so it has to
+    /// make this check for itself — see `ensure_holds_this_worktree`.
     WorktreePathNotOurs {
         path: PathBuf,
+        /// Where the occupant's own registration records it, when this
+        /// repository has a registration to ask: the occupant is one of its
+        /// worktrees, sitting at the wrong path.
+        ///
+        /// `None` covers both ways that question goes unanswered — an occupant
+        /// answering to a different repository, and a registration of ours whose
+        /// `gitdir` file has gone missing. Neither names a path to move the
+        /// directory to, so both take the hint that doesn't name one.
+        ///
+        /// The two remedies differ, which is why the case is carried rather
+        /// than inferred at display time — see the hint below.
+        occupant_registered_at: Option<PathBuf>,
     },
     /// --create flag used with pr:/mr: syntax (conflict - branch already exists)
     RefCreateConflict {
@@ -892,9 +905,11 @@ impl GitError {
                 cformat!("No worktree @ <bold>{path_display}</>")
             }
 
-            GitError::WorktreePathNotOurs { path } => {
+            GitError::WorktreePathNotOurs { path, .. } => {
                 let path_display = format_path_for_display(path);
-                cformat!("Directory @ <bold>{path_display}</> is not this repository's worktree")
+                cformat!(
+                    "Directory @ <bold>{path_display}</> does not hold the worktree registered there"
+                )
             }
 
             GitError::RefCreateConflict {
@@ -1466,20 +1481,35 @@ impl GitError {
                 )
             }
 
-            GitError::WorktreePathNotOurs { .. } => {
+            GitError::WorktreePathNotOurs {
+                occupant_registered_at,
+                ..
+            } => {
                 let title = self.title();
-                write!(
-                    f,
-                    "{}\n{}",
-                    error_message(&title),
-                    // No `git worktree prune` on its own: prune keeps a
-                    // registration whose directory resolves, which this one
-                    // does — the occupant's own `.git` answers for it. Moving
-                    // the directory is what makes prune able to act.
-                    hint_message(cformat!(
+                // Both remedies end in `git worktree prune`, and neither can
+                // start with it: prune keeps a registration whose directory
+                // resolves, which this one does — the occupant's own `.git`
+                // answers for it. Moving the directory is what makes prune able
+                // to act. Where it should move to is what the two cases
+                // disagree on.
+                let hint = match occupant_registered_at {
+                    // A worktree of this repository, whose own registration
+                    // still records the directory it left. Naming that path is
+                    // what keeps prune to the one stale entry: from anywhere
+                    // else both registrations are prunable, and clearing them
+                    // both leaves this checkout pointing at a registration that
+                    // no longer exists.
+                    Some(registered_at) => {
+                        let registered_display = format_path_for_display(registered_at);
+                        cformat!(
+                            "Removing it could destroy the worktree registered @ <underline>{registered_display}</>; move the directory back there, then run <underline>git worktree prune</>"
+                        )
+                    }
+                    None => cformat!(
                         "Removing it could destroy unrelated data; move the directory aside, then run <underline>git worktree prune</>"
-                    ))
-                )
+                    ),
+                };
+                write!(f, "{}\n{}", error_message(&title), hint_message(hint))
             }
 
             GitError::RefCreateConflict {
