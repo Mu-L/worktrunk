@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Improved
+
+- **`remote_repo` names the repository as the remote spells it**: `repo` is the directory on disk, so a renamed clone reports the new name. `{{ remote_repo }}` takes it from the primary remote's URL, available everywhere `owner` is and unset when no remote parses. ([#3745](https://github.com/max-sixty/worktrunk/pull/3745), thanks @canac)
+
 ## 0.73.0
 
 ### Fixed
