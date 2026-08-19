@@ -12,6 +12,17 @@ inputs:
 runs:
   using: composite
   steps:
+    # Above the cache step on purpose: rust-cache hashes the CARGO*/RUST* vars
+    # visible at its own step into the key, so these have to be set first, and
+    # have to match what ci.yaml's workflow `env:` block gives the jobs that
+    # write the shared cache (see "Build environment" in .github/CLAUDE.md).
+    - name: Set build environment
+      shell: bash
+      run: |
+        echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "RUSTFLAGS=-C debuginfo=0" >> "$GITHUB_ENV"
+
     - name: Install cargo-insta
       if: inputs.install-cargo-tools == 'true'
       uses: baptiste0928/cargo-install@v3
@@ -29,7 +40,14 @@ runs:
     - name: "\U0001F4B0 Cache"
       uses: Swatinem/rust-cache@v2
       with:
-        prefix-key: ${{ hashFiles('Cargo.lock') }}
+        # Restore the shared cache `test-setup`'s jobs publish from main; never
+        # save (tend jobs would deposit single-use entries against the 10 GB
+        # repo cap). Each field has to match what those jobs compute or the
+        # restore silently misses, as the old `hashFiles('Cargo.lock')` prefix
+        # and job-name shared-key did.
+        cache-bin: false
+        prefix-key: v1-rust
+        shared-key: shared
         save-if: false
 
     - name: Install uv
@@ -47,11 +65,3 @@ runs:
       run: |
         sudo apt-get update
         sudo apt-get install -y zsh fish
-
-    - name: Set build environment
-      shell: bash
-      run: |
-        echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
-        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-        echo "RUSTFLAGS=-C debuginfo=0" >> "$GITHUB_ENV"
-        echo "RUSTDOCFLAGS=-Dwarnings" >> "$GITHUB_ENV"
