@@ -266,6 +266,11 @@ Files to update:
 | `Cargo.toml` | `rust-version` | `"1.93"` |
 | `tests/helpers/wt-perf/Cargo.toml` | `rust-version` | `"1.93"` |
 | `rust-toolchain.toml` | `channel` | `"1.93.0"` |
+| `.github/workflows/nightly.yaml` | `rustup override set nightly-<date>`, twice (`minimal-versions`, `check-unused-dependencies`) | a nightly from the last few weeks |
+
+Bump the nightly pins only when the pinned date is more than three months old.
+Cargo refuses a workspace whose `rust-version` exceeds the toolchain, so an
+MSRV bump past a stale pin fails both jobs before they check anything.
 
 `flake.nix` reads the channel from `rust-toolchain.toml`, so no separate bump
 is needed. After updating the toolchain, refresh `flake.lock` so the locked
@@ -339,9 +344,26 @@ Triage each duplicate:
   open an issue or fix it. Common shapes: `merge_base("main", "<sha>")` vs
   `merge_base("main", "branch")` keying separately;
   `worktree_at(cwd)` vs `worktree_at(porcelain_path)` not canonicalizing.
+- **Measurement artifact** — `-vv` is what produces the trace, and the
+  diagnostic collector that writes the bundle runs its own `git --version`,
+  `gh --version`, and `git worktree list --porcelain` (`src/diagnostic.rs`)
+  *after* the render, into the same trace. So the report reliably pairs those
+  with the render's calls on an otherwise clean run. Only a duplicate *within*
+  the render is a finding; the collector's calls are the trailing block in
+  `"$(git rev-parse --git-common-dir)/wt/logs/trace.log"`.
 
 Baseline: ~29 git subprocesses per render on a clean tree; a jump above
-~32 warrants investigation.
+~32 warrants investigation. `command_count` in the same JSON report is the
+number to read, minus the collector's three calls: the baseline was measured
+before the recipe used `-vv`, so it counts the render alone, and three is the
+whole width of the ~32 threshold.
+
+Discounting by hand is a stopgap — the durable fix is to give the collector's
+subprocesses a reserved context in `Profile::from_entries` and exclude it from
+both `command_count` and the duplicate bucketing, so the number means the
+render again. When that lands, delete this paragraph, the **Measurement
+artifact** bullet, and the discount clause in the paragraph above — the
+`~29`/`~32` baseline itself stays.
 
 ## Weekly Maintenance: LLM Model Names in Docs
 
