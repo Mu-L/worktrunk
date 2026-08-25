@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Windows: a path past the 260-character limit compared as if it were on another drive**: `dunce` strips the `\\?\` prefix only below that length, so a deep `node_modules` came back spelled `\\?\C:\…` while its worktree root stayed `C:\…`. `wt step copy-ignored` refused to copy into it, and `wt switch` (and `remove`, `merge`, `step relocate`) silently landed the shell at the worktree root instead of your subdirectory. The canonicalizer now returns one spelling at any length. (fixes [#3898](https://github.com/max-sixty/worktrunk/issues/3898), thanks @Persedes for reporting)
+
 ## 0.74.0
 
 ### Improved
