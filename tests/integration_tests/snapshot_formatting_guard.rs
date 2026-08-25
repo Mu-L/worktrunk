@@ -178,24 +178,55 @@ fn test_no_host_specific_paths_in_snapshots() {
 /// Visit every committed `.snap` file. Snapshot dirs live under `src`
 /// (unit tests), `tests` (integration tests), and `docs` (demo fixtures).
 fn for_each_snapshot(project_root: &Path, mut f: impl FnMut(&Path, &str)) {
+    // Every caller asserts *absence* over the corpus, so snapshots that stop
+    // being walked pass vacuously. The panic in `visit_snap_files` covers a root
+    // that can't be read; this covers one that reads fine and has stopped
+    // holding snapshots. Per root rather than in aggregate, because a layout
+    // change moves one root and leaves the others: `tests` alone holds the large
+    // majority of the corpus, so an aggregate non-empty check would survive
+    // losing it. That makes each root load-bearing — a root that legitimately
+    // stops holding snapshots belongs out of this list, not exempted from it.
     for root in ["src", "tests", "docs"] {
-        visit_snap_files(&project_root.join(root), &mut f);
+        let mut seen = 0usize;
+        visit_snap_files(&project_root.join(root), &mut |path, content| {
+            seen += 1;
+            f(path, content);
+        });
+        assert!(
+            seen > 0,
+            "{root}/ holds no .snap files — the corpus has moved, so these \
+             assertions are now passing over whatever is left of it"
+        );
     }
 }
 
 fn visit_snap_files(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
-    // Every caller asserts absence over the corpus, so a walk that reads
-    // nothing passes vacuously. Swallowing the error is what makes a
-    // directory-layout change look like a clean corpus; surface it instead.
+    // A root that can't be read yields no snapshots, and every caller asserts
+    // absence, so swallowing the error would let an unreadable directory read as
+    // a clean corpus. `for_each_snapshot` covers the separate case where the
+    // roots read fine and simply hold nothing.
     let entries = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{} unreadable during the snapshot scan: {e}", dir.display()));
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        // `flatten()` here would drop a per-entry error — a file removed
+        // mid-walk, a failing `stat` — and skip a snapshot without saying so.
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "an entry in {} unreadable during the snapshot scan: {e}",
+                dir.display()
+            )
+        });
         let path = entry.path();
         if path.is_dir() {
             visit_snap_files(&path, f);
         } else if path.extension().and_then(|s| s.to_str()) == Some("snap") {
-            let content = fs::read_to_string(&path).unwrap();
+            let content = fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!(
+                    "{} unreadable during the snapshot scan: {e}",
+                    path.display()
+                )
+            });
             f(&path, &content);
         }
     }

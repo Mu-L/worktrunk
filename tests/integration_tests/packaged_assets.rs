@@ -52,6 +52,15 @@ fn embedded_assets_ship_in_package() {
     //    repo-root-relative forward-slash string.
     let mut assets = BTreeSet::new();
     scan_directory(&src_dir, manifest_dir, &mut assets);
+    // `scan_directory` and `scan_file` panic when the tree or one of its files
+    // can't be read. This catches the remaining way discovery comes back empty:
+    // every file read, and the `include_str!` / `include_bytes!` / `#[template]`
+    // matching recognizing none of them. The comparison below iterates `assets`,
+    // so an empty set checks nothing and passes.
+    assert!(
+        !assets.is_empty(),
+        "scanned src/ but found no embedded assets — the scanner is likely broken"
+    );
 
     // 2. The set of files `cargo publish` would put in the crates.io archive.
     let packaged = cargo_package_list(manifest_dir);
@@ -95,7 +104,16 @@ fn scan_directory(dir: &Path, manifest_dir: &Path, assets: &mut BTreeSet<String>
     let entries = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{} unreadable during the src/ scan: {e}", dir.display()));
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        // `flatten()` here would drop a per-entry error, so a file that never
+        // reaches `scan_file` takes whatever it embeds with it while the rest
+        // keep `assets` non-empty — past both the panic and the assert.
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "an entry in {} unreadable during the src/ scan: {e}",
+                dir.display()
+            )
+        });
         let path = entry.path();
         if path.is_dir() {
             scan_directory(&path, manifest_dir, assets);
@@ -106,9 +124,12 @@ fn scan_directory(dir: &Path, manifest_dir: &Path, assets: &mut BTreeSet<String>
 }
 
 fn scan_file(path: &Path, manifest_dir: &Path, assets: &mut BTreeSet<String>) {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return;
-    };
+    // Returning here would drop whatever this file embeds while the rest keep
+    // `assets` non-empty, so the empty-scan assert above wouldn't catch it
+    // either. A `.rs` file under `src/` that isn't readable UTF-8 is broken in a
+    // way the crate wouldn't compile through.
+    let contents = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{} unreadable during the src/ scan: {e}", path.display()));
     let source_dir = path.parent().unwrap_or(manifest_dir);
 
     for line in contents.lines() {
