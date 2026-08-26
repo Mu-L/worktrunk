@@ -37,6 +37,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use crate::common::source_scan::visit_files;
 use path_slash::PathExt as _;
 
 /// askama resolves `#[template(path = "…")]` relative to `templates/` at the
@@ -51,9 +52,16 @@ fn embedded_assets_ship_in_package() {
     // 1. Discover every compile-time-embedded path under `src/`, as a
     //    repo-root-relative forward-slash string.
     let mut assets = BTreeSet::new();
-    scan_directory(&src_dir, manifest_dir, &mut assets);
-    // `scan_directory` and `scan_file` panic when the tree or one of its files
-    // can't be read. This catches the remaining way discovery comes back empty:
+    // The count is discarded: `assets` being non-empty below already fails over
+    // an empty walk, so asserting the count too would be a second mechanism.
+    let _ = visit_files(
+        &src_dir,
+        "rs",
+        "embedded-asset scan",
+        &mut |path, contents| scan_file(path, contents, manifest_dir, &mut assets),
+    );
+    // `visit_files` panics when the tree or one of its files can't be read.
+    // This catches the remaining way discovery comes back empty:
     // every file read, and the `include_str!` / `include_bytes!` / `#[template]`
     // matching recognizing none of them. The comparison below iterates `assets`,
     // so an empty set checks nothing and passes.
@@ -97,39 +105,7 @@ fn embedded_assets_ship_in_package() {
     );
 }
 
-fn scan_directory(dir: &Path, manifest_dir: &Path, assets: &mut BTreeSet<String>) {
-    // A directory the walk can't read yields no assets, so swallowing the
-    // error lets an unreadable or relocated `src/` read as a crate that embeds
-    // nothing — every violation below goes unchecked. Surface it instead.
-    let entries = fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("{} unreadable during the src/ scan: {e}", dir.display()));
-
-    for entry in entries {
-        // `flatten()` here would drop a per-entry error, so a file that never
-        // reaches `scan_file` takes whatever it embeds with it while the rest
-        // keep `assets` non-empty — past both the panic and the assert.
-        let entry = entry.unwrap_or_else(|e| {
-            panic!(
-                "an entry in {} unreadable during the src/ scan: {e}",
-                dir.display()
-            )
-        });
-        let path = entry.path();
-        if path.is_dir() {
-            scan_directory(&path, manifest_dir, assets);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            scan_file(&path, manifest_dir, assets);
-        }
-    }
-}
-
-fn scan_file(path: &Path, manifest_dir: &Path, assets: &mut BTreeSet<String>) {
-    // Returning here would drop whatever this file embeds while the rest keep
-    // `assets` non-empty, so the empty-scan assert above wouldn't catch it
-    // either. A `.rs` file under `src/` that isn't readable UTF-8 is broken in a
-    // way the crate wouldn't compile through.
-    let contents = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("{} unreadable during the src/ scan: {e}", path.display()));
+fn scan_file(path: &Path, contents: &str, manifest_dir: &Path, assets: &mut BTreeSet<String>) {
     let source_dir = path.parent().unwrap_or(manifest_dir);
 
     for line in contents.lines() {
