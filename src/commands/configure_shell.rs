@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use anstyle::Style;
+use fs2::FileExt;
 use worktrunk::path::format_path_for_display;
 use worktrunk::shell::{self, Shell};
 use worktrunk::styling::{
@@ -655,29 +656,19 @@ fn configure_shell_file(
 
     // For other shells, check if file exists
     if path.exists() {
-        // Read the file and check if our integration already exists
+        // Read the file and check if our integration already exists. Do this
+        // read-only first so an already-configured read-only rc file succeeds.
         let content = fs::read(path)
             .map_err(|e| format!("Failed to read {}: {}", format_path_for_display(path), e))?;
 
-        // Check for the canonical line and older/manual forms for this shell.
-        for line in content.split(|byte| *byte == b'\n') {
-            let line = std::str::from_utf8(line).map_err(|e| {
-                format!(
-                    "Failed to read line from {}: {e}",
-                    format_path_for_display(path)
-                )
-            })?;
-            if is_install_shell_integration_line(line.trim_end_matches('\r'), shell, cmd) {
-                return Ok(Some(ConfigureResult {
-                    shell,
-                    path: path.to_path_buf(),
-                    action: ConfigAction::AlreadyExists,
-                    config_line,
-                }));
-            }
+        if contains_shell_integration(&content, path, shell, cmd)? {
+            return Ok(Some(ConfigureResult {
+                shell,
+                path: path.to_path_buf(),
+                action: ConfigAction::AlreadyExists,
+                config_line,
+            }));
         }
-        let mut content = String::from_utf8(content)
-            .map_err(|e| format!("Failed to read {}: {e}", format_path_for_display(path)))?;
 
         // Line doesn't exist, add it
         if dry_run {
@@ -689,22 +680,17 @@ fn configure_shell_file(
             }));
         }
 
-        // Add blank line before config, then the config line with its own newline
-        content.push('\n');
-        content.push_str(&config_line);
-        content.push('\n');
-        write_atomically(path, &content).map_err(|e| {
-            format!(
-                "Failed to write to {}: {}",
-                format_path_for_display(path),
-                e
-            )
-        })?;
+        // Append through one open file handle. Replacing an rc file from the
+        // snapshot above would discard edits made in the meantime and would
+        // also sever hard links and file metadata that belong to the user.
+        let mut file = open_locked_rc_file(path)?;
+        let action =
+            append_shell_integration_if_missing(&mut file, path, shell, cmd, &config_line)?;
 
         Ok(Some(ConfigureResult {
             shell,
             path: path.to_path_buf(),
-            action: ConfigAction::Added,
+            action,
             config_line,
         }))
     } else {
@@ -751,6 +737,112 @@ fn configure_shell_file(
             Ok(None)
         }
     }
+}
+
+fn open_locked_rc_file(path: &Path) -> Result<fs::File, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| {
+            format!(
+                "Failed to open {} for writing: {}",
+                format_path_for_display(path),
+                e
+            )
+        })?;
+    file.lock_exclusive().map_err(|e| {
+        format!(
+            "Failed to lock {} for writing: {}",
+            format_path_for_display(path),
+            e
+        )
+    })?;
+    Ok(file)
+}
+
+/// Offer an rc-file addition in one successful write.
+///
+/// `write_all` can append part of its buffer and then fail on a later write,
+/// hiding how much of the shell line reached the file. A single short write is
+/// instead an error of its own. Never truncate the user-owned file in response:
+/// no portable operation can keep a later concurrent append out of that race.
+fn write_append_buffer(
+    mut write_once: impl FnMut(&[u8]) -> io::Result<usize>,
+    addition: &[u8],
+) -> io::Result<()> {
+    let written = loop {
+        match write_once(addition) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => break result?,
+        }
+    };
+    if written == addition.len() {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::WriteZero,
+        format!(
+            "only {written} of {} bytes were written; the file may end with a partial Worktrunk shell integration line",
+            addition.len()
+        ),
+    ))
+}
+
+/// Recheck an open rc file and append the integration line if it is still absent.
+///
+/// The caller holds the file's exclusive lock. Re-reading through the same
+/// append-mode handle includes changes made after the preliminary read without
+/// replacing unrelated bytes or the file's inode.
+fn append_shell_integration_if_missing(
+    file: &mut fs::File,
+    path: &Path,
+    shell: Shell,
+    cmd: &str,
+    config_line: &str,
+) -> Result<ConfigAction, String> {
+    file.rewind()
+        .map_err(|e| format!("Failed to read {}: {}", format_path_for_display(path), e))?;
+    let mut current_content = Vec::new();
+    file.read_to_end(&mut current_content)
+        .map_err(|e| format!("Failed to read {}: {}", format_path_for_display(path), e))?;
+    if contains_shell_integration(&current_content, path, shell, cmd)? {
+        return Ok(ConfigAction::AlreadyExists);
+    }
+
+    // Add a blank line before config, then the config line with its own newline.
+    // Offer the whole addition as one buffer rather than split formatted writes.
+    let addition = format!("\n{config_line}\n");
+    write_append_buffer(|buffer| file.write(buffer), addition.as_bytes()).map_err(|e| {
+        format!(
+            "Failed to write to {}: {}",
+            format_path_for_display(path),
+            e
+        )
+    })?;
+    Ok(ConfigAction::Added)
+}
+
+fn contains_shell_integration(
+    content: &[u8],
+    path: &Path,
+    shell: Shell,
+    cmd: &str,
+) -> Result<bool, String> {
+    // Check for the canonical line and older/manual forms for this shell.
+    for line in content.split(|byte| *byte == b'\n') {
+        let line = std::str::from_utf8(line).map_err(|e| {
+            format!(
+                "Failed to read line from {}: {e}",
+                format_path_for_display(path)
+            )
+        })?;
+        if is_install_shell_integration_line(line.trim_end_matches('\r'), shell, cmd) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn is_install_shell_integration_line(line: &str, shell: Shell, cmd: &str) -> bool {
@@ -1894,6 +1986,194 @@ mod tests {
 
         assert_eq!(result.unwrap().action, ConfigAction::AlreadyExists);
         assert_eq!(fs::read(&rc).unwrap(), content);
+    }
+
+    #[test]
+    fn test_configure_shell_appends_without_replacing_existing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        let hard_link = dir.path().join("zshrc-hard-link");
+        fs::write(&rc, "export EDITOR=hx\n").unwrap();
+        fs::hard_link(&rc, &hard_link).unwrap();
+
+        let result = configure_shell_file(Shell::Zsh, &rc, false, false, "wt").unwrap();
+
+        assert_eq!(result.unwrap().action, ConfigAction::Added);
+        let expected = concat!(
+            "export EDITOR=hx\n",
+            "\n",
+            "if command -v wt >/dev/null 2>&1; then eval \"$(command wt config shell init zsh)\"; fi\n"
+        );
+        assert_eq!(fs::read_to_string(&rc).unwrap(), expected);
+        assert_eq!(fs::read_to_string(&hard_link).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_configure_shell_opens_rc_with_exclusive_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        fs::write(&rc, "export EDITOR=hx\n").unwrap();
+
+        let locked = open_locked_rc_file(&rc).unwrap();
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&rc)
+            .unwrap();
+        assert!(contender.try_lock_exclusive().is_err());
+        drop(locked);
+        contender.try_lock_exclusive().unwrap();
+    }
+
+    #[test]
+    fn test_open_locked_rc_file_reports_open_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("missing-zshrc");
+
+        let error = open_locked_rc_file(&missing).unwrap_err();
+
+        assert!(error.starts_with(&format!(
+            "Failed to open {} for writing:",
+            format_path_for_display(&missing)
+        )));
+    }
+
+    #[test]
+    fn test_append_write_retries_interrupt_and_reports_incomplete_writes() {
+        let original = b"export EDITOR=hx\n";
+        let addition = b"\nif command -v wt; then eval ...\n";
+        let mut short_content = original.to_vec();
+        let mut short_calls = 0;
+
+        let error = write_append_buffer(
+            |buffer| {
+                short_calls += 1;
+                let written = buffer.len().min(12);
+                short_content.extend_from_slice(&buffer[..written]);
+                Ok(written)
+            },
+            addition,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        assert!(
+            error
+                .to_string()
+                .contains("partial Worktrunk shell integration line")
+        );
+        assert_eq!(
+            short_content,
+            [original.as_slice(), &addition[..12]].concat()
+        );
+        assert_eq!(short_calls, 1, "a short append must not write again");
+
+        let mut interrupted_content = original.to_vec();
+        let mut interrupted_calls = 0;
+        write_append_buffer(
+            |buffer| {
+                interrupted_calls += 1;
+                if interrupted_calls == 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "injected write error",
+                    ));
+                }
+                interrupted_content.extend_from_slice(buffer);
+                Ok(buffer.len())
+            },
+            addition,
+        )
+        .unwrap();
+
+        assert_eq!(
+            interrupted_content,
+            [original.as_slice(), addition.as_slice()].concat()
+        );
+        assert_eq!(interrupted_calls, 2);
+
+        let mut failed_calls = 0;
+        let error = write_append_buffer(
+            |_| {
+                failed_calls += 1;
+                Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "injected write error",
+                ))
+            },
+            addition,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert!(
+            !error
+                .to_string()
+                .contains("partial Worktrunk shell integration line")
+        );
+        assert_eq!(failed_calls, 1);
+    }
+
+    #[test]
+    fn test_append_shell_integration_reports_write_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        let original = "export EDITOR=hx\n";
+        fs::write(&rc, original).unwrap();
+        let mut read_only = fs::File::open(&rc).unwrap();
+        let config_line = Shell::Zsh.config_line("wt");
+
+        let error = append_shell_integration_if_missing(
+            &mut read_only,
+            &rc,
+            Shell::Zsh,
+            "wt",
+            &config_line,
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with(&format!(
+            "Failed to write to {}:",
+            format_path_for_display(&rc)
+        )));
+        assert!(!error.contains("partial Worktrunk shell integration line"));
+        assert_eq!(fs::read_to_string(&rc).unwrap(), original);
+    }
+
+    #[test]
+    fn test_configure_shell_rereads_open_file_before_appending() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        fs::write(&rc, "export EDITOR=hx\n").unwrap();
+
+        let mut pending_installer = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&rc)
+            .unwrap();
+
+        let config_line = Shell::Zsh.config_line("wt");
+        let mut concurrent_installer = fs::OpenOptions::new().append(true).open(&rc).unwrap();
+        write!(concurrent_installer, "\n{config_line}\n").unwrap();
+        drop(concurrent_installer);
+
+        let action = append_shell_integration_if_missing(
+            &mut pending_installer,
+            &rc,
+            Shell::Zsh,
+            "wt",
+            &config_line,
+        )
+        .unwrap();
+
+        assert_eq!(action, ConfigAction::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&rc)
+                .unwrap()
+                .matches(&config_line)
+                .count(),
+            1
+        );
     }
 
     #[test]
