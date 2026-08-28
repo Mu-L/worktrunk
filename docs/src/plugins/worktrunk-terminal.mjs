@@ -385,6 +385,7 @@ export function pluginWorktrunkTerminal() {
         color: var(--wt-ink-muted);
       }
       .expressive-code .frame.is-terminal .wt-terminal-gutter {
+        display: inline-block;
         background: var(--wt-terminal-gutter);
       }
       .expressive-code .frame.is-terminal .wt-terminal-bold {
