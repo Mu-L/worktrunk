@@ -4091,6 +4091,256 @@ fn test_plugins_codex_install_command_fails(mut repo: TestRepo, temp_home: TempD
     });
 }
 
+/// The marketplace registers but `codex plugin add` fails: the install stops
+/// there rather than reporting a plugin it never installed.
+#[rstest]
+fn test_plugins_codex_install_plugin_add_fails(mut repo: TestRepo, temp_home: TempDir) {
+    repo.setup_mock_ci_tools_unauthenticated();
+    repo.setup_mock_codex_with_plugin_ops_failing();
+
+    let settings = setup_snapshot_settings_with_home(&repo, &temp_home);
+    settings.bind(|| {
+        let mut cmd = repo.wt_command();
+        cmd.args(["config", "plugins", "codex", "install", "--yes"])
+            .current_dir(repo.root_path());
+        set_temp_home_env(&mut cmd, temp_home.path());
+
+        assert_cmd_snapshot!(cmd);
+    });
+}
+
+/// Run `wt config plugins <tool> <action>` and accept the prompt, returning the
+/// argv of every `<tool>` the run spawned — argv\[0\] excluded, as `mock_calls`
+/// records it.
+///
+/// The call log is the helper's own directory, so a caller looping over
+/// install and uninstall can't carry install's calls into uninstall's
+/// assertion. It lives outside the repo under test for the reason `mock_calls`
+/// documents: a log in the working tree would leave an untracked file behind
+/// the command being measured.
+fn plugin_calls_when_accepted(
+    repo: &TestRepo,
+    tool: &str,
+    action: &str,
+    home: &std::path::Path,
+) -> Vec<String> {
+    use crate::common::mock_commands::mock_calls;
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let call_log = TempDir::new().unwrap();
+    let mut cmd = repo.wt_command();
+    cmd.args(["config", "plugins", tool, action])
+        .current_dir(repo.root_path())
+        .env("WORKTRUNK_TEST_MOCK_CALL_LOG_DIR", call_log.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    set_temp_home_env(&mut cmd, home);
+
+    let mut child = cmd.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "accepting {tool} {action}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    mock_calls(call_log.path(), tool)
+}
+
+/// The `?` preview lists exactly the commands each Codex plugin subcommand
+/// runs: declining spawns none of them, and accepting spawns exactly those,
+/// so the confirmation the user answers matches what follows it.
+#[rstest]
+fn test_plugins_codex_prompt_previews_commands(mut repo: TestRepo, temp_home: TempDir) {
+    use crate::common::mock_commands::mock_calls;
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    repo.setup_mock_ci_tools_unauthenticated();
+    repo.setup_mock_codex_with_plugins();
+
+    // Outside the repo: a call log in the working tree would leave an
+    // untracked file behind the command under test.
+    let call_log = TempDir::new().unwrap();
+
+    for (action, expected) in [
+        (
+            "install",
+            [
+                "codex plugin marketplace add max-sixty/worktrunk",
+                "codex plugin add worktrunk@worktrunk",
+            ],
+        ),
+        (
+            "uninstall",
+            [
+                "codex plugin remove worktrunk@worktrunk",
+                "codex plugin marketplace remove worktrunk",
+            ],
+        ),
+    ] {
+        let mut cmd = repo.wt_command();
+        cmd.args(["config", "plugins", "codex", action])
+            .current_dir(repo.root_path())
+            .env("WORKTRUNK_TEST_MOCK_CALL_LOG_DIR", call_log.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        set_temp_home_env(&mut cmd, temp_home.path());
+
+        let mut child = cmd.spawn().unwrap();
+        // `?` renders the preview; `n` then declines, so nothing runs.
+        child.stdin.take().unwrap().write_all(b"?\nn\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .ansi_strip()
+            .to_string();
+        // Compare the whole set of previewed commands, not each one in
+        // isolation: a command the preview lists but never runs is exactly
+        // what a per-command `contains` would let through.
+        // The first gutter line shares a line with the prompt, which `eprint!`
+        // leaves unterminated, so slice from each `codex ` rather than
+        // matching the line start.
+        let previewed: Vec<&str> = stderr
+            .lines()
+            .filter_map(|line| line.find("codex ").map(|i| line[i..].trim_end()))
+            .collect();
+        assert_eq!(previewed, expected, "{action} preview: {stderr}");
+        // The preview is only a preview: declining must leave codex unspawned.
+        let calls = mock_calls(call_log.path(), "codex");
+        assert!(
+            calls.is_empty(),
+            "declining {action} must spawn no codex: {calls:#?}"
+        );
+
+        // Both sides of the comparison above are the preview text, so nothing
+        // there observes the argv. Accepting the same prompt and reading the
+        // call log is what pins the preview to the spawn.
+        let ran = plugin_calls_when_accepted(&repo, "codex", action, temp_home.path());
+        // `mock_calls` records argv without argv[0]; `expected` carries the
+        // binary name because that is how the preview renders it.
+        let want: Vec<String> = expected
+            .iter()
+            .map(|c| c.strip_prefix("codex ").unwrap().to_string())
+            .collect();
+        assert_eq!(ran, want, "{action} ran: {ran:#?}");
+    }
+}
+
+/// The `?` preview lists exactly the commands each Claude plugin subcommand
+/// runs: declining spawns none of them, and accepting spawns exactly those,
+/// so the confirmation the user answers matches what follows it.
+#[rstest]
+fn test_plugins_claude_prompt_previews_commands(mut repo: TestRepo) {
+    use crate::common::mock_commands::mock_calls;
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    repo.setup_mock_ci_tools_unauthenticated();
+    repo.setup_mock_claude_with_plugins();
+
+    // Outside the repo: a call log in the working tree would leave an
+    // untracked file behind the command under test.
+    let call_log = TempDir::new().unwrap();
+
+    for (action, expected) in [
+        (
+            "install",
+            [
+                "claude plugin marketplace add max-sixty/worktrunk",
+                "claude plugin install worktrunk@worktrunk",
+            ],
+        ),
+        (
+            "uninstall",
+            [
+                "claude plugin uninstall worktrunk@worktrunk",
+                "claude plugin marketplace remove worktrunk",
+            ],
+        ),
+    ] {
+        // Each subcommand prompts only from the state it acts on, so the home
+        // is per-action: install returns early when the plugin is already
+        // installed, uninstall when it isn't.
+        let temp_home = TempDir::new().unwrap();
+        if action == "uninstall" {
+            TestRepo::setup_plugin_installed(temp_home.path());
+        }
+
+        let mut cmd = repo.wt_command();
+        cmd.args(["config", "plugins", "claude", action])
+            .current_dir(repo.root_path())
+            .env("WORKTRUNK_TEST_MOCK_CALL_LOG_DIR", call_log.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        set_temp_home_env(&mut cmd, temp_home.path());
+
+        let mut child = cmd.spawn().unwrap();
+        // `?` renders the preview; `n` then declines, so nothing runs.
+        child.stdin.take().unwrap().write_all(b"?\nn\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .ansi_strip()
+            .to_string();
+        // Compare the whole set of previewed commands, not each one in
+        // isolation: a command the preview lists but never runs is exactly
+        // what a per-command `contains` would let through.
+        // The first gutter line shares a line with the prompt, which `eprint!`
+        // leaves unterminated, so slice from each `claude ` rather than
+        // matching the line start.
+        let previewed: Vec<&str> = stderr
+            .lines()
+            .filter_map(|line| line.find("claude ").map(|i| line[i..].trim_end()))
+            .collect();
+        assert_eq!(previewed, expected, "{action} preview: {stderr}");
+        // The preview is only a preview: declining must leave claude unspawned.
+        let calls = mock_calls(call_log.path(), "claude");
+        assert!(
+            calls.is_empty(),
+            "declining {action} must spawn no claude: {calls:#?}"
+        );
+
+        // Both sides of the comparison above are the preview text, so nothing
+        // there observes the argv. Accepting the same prompt and reading the
+        // call log is what pins the preview to the spawn — and it is the only
+        // thing that can here: `setup_mock_claude_with_plugins` registers the
+        // `plugin marketplace` prefix, which matches `add` and `remove` alike,
+        // so a wrong marketplace name still reaches the mock's exit 0.
+        let ran = plugin_calls_when_accepted(&repo, "claude", action, temp_home.path());
+        // `mock_calls` records argv without argv[0]; `expected` carries the
+        // binary name because that is how the preview renders it.
+        let want: Vec<String> = expected
+            .iter()
+            .map(|c| c.strip_prefix("claude ").unwrap().to_string())
+            .collect();
+        assert_eq!(ran, want, "{action} ran: {ran:#?}");
+    }
+}
+
+/// `codex plugin remove` fails: the uninstall surfaces codex's error and stops
+/// rather than removing the marketplace out from under an installed plugin.
+#[rstest]
+fn test_plugins_codex_uninstall_plugin_remove_fails(mut repo: TestRepo, temp_home: TempDir) {
+    repo.setup_mock_ci_tools_unauthenticated();
+    repo.setup_mock_codex_with_plugin_ops_failing();
+
+    let settings = setup_snapshot_settings_with_home(&repo, &temp_home);
+    settings.bind(|| {
+        let mut cmd = repo.wt_command();
+        cmd.args(["config", "plugins", "codex", "uninstall", "--yes"])
+            .current_dir(repo.root_path());
+        set_temp_home_env(&mut cmd, temp_home.path());
+
+        assert_cmd_snapshot!(cmd);
+    });
+}
+
 #[test]
 fn test_codex_plugin_metadata_is_valid_json() {
     let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -5586,6 +5836,41 @@ fn test_plugins_claude_uninstall_command_fails(mut repo: TestRepo, temp_home: Te
     });
 }
 
+/// `claude plugin uninstall` succeeds and the marketplace removal that follows
+/// it fails: the uninstall surfaces claude's error rather than reporting a
+/// marketplace it never removed.
+#[rstest]
+fn test_plugins_claude_uninstall_second_step_fails(mut repo: TestRepo, temp_home: TempDir) {
+    use crate::common::mock_commands::{MockConfig, MockResponse};
+
+    repo.setup_mock_ci_tools_unauthenticated();
+    repo.setup_mock_claude_installed();
+    TestRepo::setup_plugin_installed(temp_home.path());
+
+    // Plugin uninstall succeeds and only the marketplace removal that follows
+    // it fails, so the error the command surfaces can come from nothing else.
+    let mock_bin = repo
+        .mock_bin_path()
+        .expect("setup_mock_ci_tools_unauthenticated creates mock-bin");
+    MockConfig::new("claude")
+        .command("plugin uninstall", MockResponse::exit(0))
+        .command(
+            "plugin marketplace remove",
+            MockResponse::exit(1).with_stderr("error: marketplace remove failed\n"),
+        )
+        .write(mock_bin);
+
+    let settings = setup_snapshot_settings_with_home(&repo, &temp_home);
+    settings.bind(|| {
+        let mut cmd = repo.wt_command();
+        cmd.args(["config", "plugins", "claude", "uninstall", "--yes"])
+            .current_dir(repo.root_path());
+        set_temp_home_env(&mut cmd, temp_home.path());
+
+        assert_cmd_snapshot!(cmd);
+    });
+}
+
 // ==================== Plugin Prompt PTY Tests ====================
 
 #[cfg(all(unix, feature = "shell-integration-tests"))]
@@ -5809,7 +6094,7 @@ mod plugin_prompt_pty {
             "Should show prompt. Output:\n{output}"
         );
         assert!(
-            output.contains("Plugin uninstalled"),
+            output.contains("Plugin & marketplace removed"),
             "Should confirm uninstallation. Output:\n{output}"
         );
     }
@@ -5836,7 +6121,7 @@ mod plugin_prompt_pty {
             "Should show prompt. Output:\n{output}"
         );
         assert!(
-            !output.contains("Plugin uninstalled"),
+            !output.contains("Plugin & marketplace removed"),
             "Should NOT uninstall when declined. Output:\n{output}"
         );
     }
