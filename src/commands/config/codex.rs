@@ -1,5 +1,7 @@
 //! Codex plugin and marketplace management.
 
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 use color_print::cformat;
 use worktrunk::styling::{eprintln, hint_message, progress_message, success_message};
@@ -81,9 +83,10 @@ pub fn handle_codex_uninstall(yes: bool) -> Result<()> {
         "{}",
         progress_message("Removing Codex plugin marketplace...")
     );
-    super::run_plugin_cli(
+    super::run_plugin_removal(
         "codex",
         &["plugin", "marketplace", "remove", MARKETPLACE_NAME],
+        is_marketplace_configured,
     )?;
 
     eprintln!("{}", success_message("Codex plugin & marketplace removed"));
@@ -97,4 +100,52 @@ fn require_codex_cli() -> Result<()> {
     }
 
     bail!("codex CLI not found. Install Codex first: https://developers.openai.com/codex/cli/");
+}
+
+/// Codex's config root.
+///
+/// Honors `CODEX_HOME`, which relocates the whole tree away from `~/.codex`,
+/// the same way `claude_config_dir` honors `CLAUDE_CONFIG_DIR`. They diverge
+/// on one point deliberately: a leading `~/` is taken literally here rather
+/// than expanded against the home directory, because a shell expands it before
+/// the variable is set and nothing sets `CODEX_HOME` from a non-shell context.
+fn codex_config_dir() -> Option<PathBuf> {
+    match std::env::var("CODEX_HOME") {
+        Ok(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => worktrunk::path::home_dir().map(|home| home.join(".codex")),
+    }
+}
+
+/// Whether the worktrunk marketplace is configured in Codex, or `None` where
+/// the config cannot answer.
+///
+/// `codex plugin marketplace remove` exits non-zero when the marketplace is
+/// not configured, so uninstall needs to tell that from a removal that
+/// genuinely failed. Codex records each one as a `[marketplaces.<name>]`
+/// table in `config.toml`.
+///
+/// `None` is the same "cannot tell" the Claude reader returns: a `config.toml`
+/// that will not read or parse, or whose `marketplaces` is not a table, cannot
+/// say worktrunk's entry is gone.
+///
+/// It claims less than the Claude reader does, because less is available here.
+/// A fresh `config.toml` legitimately has no `marketplaces` key at all, so a
+/// key that was renamed or relocated is indistinguishable from a user who has
+/// configured no marketplaces, and reads as a confident absence.
+pub(super) fn is_marketplace_configured() -> Option<bool> {
+    let path = codex_config_dir()?.join("config.toml");
+    // `try_exists` so a directory we lack permission to stat is unknown rather
+    // than the `false` that `exists` reports for it.
+    if !path.try_exists().ok()? {
+        return Some(false);
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    let config = content.parse::<toml::Table>().ok()?;
+    match config.get("marketplaces") {
+        None => Some(false),
+        Some(marketplaces) => marketplaces
+            .as_table()
+            .map(|table| table.contains_key(MARKETPLACE_NAME)),
+    }
 }
