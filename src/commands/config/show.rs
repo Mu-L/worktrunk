@@ -708,11 +708,8 @@ fn render_user_config(out: &mut String, has_system_config: bool) -> anyhow::Resu
 
     // Check for deprecations with emit_inline_warnings=false (silent mode)
     // User config is global, not tied to any repository
-    // Deprecated patterns supersede the TOML dump below (their diff covers
-    // the file); a pending-default pin is additive, so the dump stays. An
-    // empty file still gets the pending-pin details — `wt config update`
-    // would rewrite it — just no dump.
-    let mut details_shown = false;
+    // Deprecated patterns supersede the TOML dump below because their diff
+    // covers the file.
     let skip_dump = match worktrunk::config::check_and_migrate(
         &config_path,
         &contents,
@@ -726,8 +723,7 @@ fn render_user_config(out: &mut String, has_system_config: bool) -> anyhow::Resu
                 out.push_str(&worktrunk::config::format_deprecation_details(
                     &info, &contents,
                 ));
-                details_shown = true;
-                info.has_deprecated_patterns()
+                true
             } else {
                 false
             }
@@ -755,10 +751,6 @@ fn render_user_config(out: &mut String, has_system_config: bool) -> anyhow::Resu
     // Display TOML with syntax highlighting (gutter at column 0).
     // Skip when deprecations were shown — the proposed diff already covers it.
     if !skip_dump {
-        if details_shown {
-            // Pending-pin details above end in their diff; separate phases.
-            out.push('\n');
-        }
         writeln!(out, "{}", format_toml(&contents))?;
     }
 
@@ -913,12 +905,9 @@ fn render_project_config(out: &mut String) -> anyhow::Result<()> {
 
     // Check for deprecations with emit_inline_warnings=false (silent mode)
     // Only write migration file in main worktree, not linked worktrees.
-    // Deprecated patterns supersede the TOML dump below (their diff covers
-    // the file); a pending-default pin would be additive, so the dump stays —
-    // no pending-default rule targets project config today, but the shape
-    // mirrors render_user_config so the two stay interchangeable.
+    // Deprecated patterns supersede the TOML dump below because their diff
+    // covers the file.
     let is_main_worktree = !repo.current_worktree().is_linked().unwrap_or(true);
-    let mut details_shown = false;
     let skip_dump = match worktrunk::config::check_and_migrate(
         &config_path,
         &contents,
@@ -932,8 +921,7 @@ fn render_project_config(out: &mut String) -> anyhow::Result<()> {
                 out.push_str(&worktrunk::config::format_deprecation_details(
                     &info, &contents,
                 ));
-                details_shown = true;
-                info.has_deprecated_patterns()
+                true
             } else {
                 false
             }
@@ -956,10 +944,6 @@ fn render_project_config(out: &mut String) -> anyhow::Result<()> {
     // Display TOML with syntax highlighting (gutter at column 0).
     // Skip when deprecations were shown — the proposed diff already covers it.
     if !skip_dump {
-        if details_shown {
-            // Pending-pin details above end in their diff; separate phases.
-            out.push('\n');
-        }
         writeln!(out, "{}", format_toml(&contents))?;
     }
 
