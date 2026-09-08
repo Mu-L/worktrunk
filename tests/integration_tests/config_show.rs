@@ -81,6 +81,39 @@ fn test_config_show_no_project_config(mut repo: TestRepo, temp_home: TempDir) {
     });
 }
 
+#[rstest]
+fn test_config_show_rejects_invalid_approvals_file(repo: TestRepo) {
+    fs::write(repo.test_approvals_path(), "not valid TOML [[[").unwrap();
+
+    let output = repo.wt_command().args(["config", "show"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.ansi_strip();
+    assert!(stdout.contains("Invalid approvals"), "stdout:\n{stdout}");
+    assert!(stdout.contains("approvals.toml"), "stdout:\n{stdout}");
+}
+
+#[rstest]
+fn test_config_show_hides_fully_approved_commands(repo: TestRepo) {
+    repo.write_project_config("pre-start = \"npm install\"\n");
+    let project = repo.repo.project_identifier().unwrap();
+    let project = toml::Value::String(project).to_string();
+    fs::write(
+        repo.test_approvals_path(),
+        format!("[projects.{project}]\napproved-commands = [\"npm install\"]\n"),
+    )
+    .unwrap();
+
+    let output = repo.wt_command().args(["config", "show"]).output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.ansi_strip();
+    assert!(!stdout.contains("APPROVALS"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("awaiting approval"), "stdout:\n{stdout}");
+}
+
 // ==================== System Config Tests ====================
 
 #[rstest]
@@ -411,9 +444,7 @@ deps = "post-create-tool"
 }
 
 #[rstest]
-fn test_config_show_system_config_hint_under_user_config(repo: TestRepo, temp_home: TempDir) {
-    // When no system config exists but user config does, config show should
-    // display a hint under USER CONFIG with the platform-specific default path
+fn test_config_show_absent_system_config_is_a_user_config_hint(repo: TestRepo, temp_home: TempDir) {
     let global_config_dir = temp_home.path().join(".config").join("worktrunk");
     fs::create_dir_all(&global_config_dir).unwrap();
     fs::write(
@@ -432,16 +463,11 @@ fn test_config_show_system_config_hint_under_user_config(repo: TestRepo, temp_ho
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Should NOT show a full SYSTEM CONFIG heading
     assert!(
-        !stdout.contains("SYSTEM CONFIG"),
-        "Should not show SYSTEM CONFIG section when absent, got:\n{stdout}"
-    );
-    // Should show a system config hint under USER CONFIG
-    assert!(
-        stdout.contains("Optional system config not found")
+        !stdout.contains("SYSTEM CONFIG")
+            && stdout.contains("Optional system config not found")
             && stdout.contains("worktrunk/config.toml"),
-        "Expected system config hint in output, got:\n{stdout}"
+        "Expected a compact system config hint, got:\n{stdout}"
     );
 }
 
@@ -545,6 +571,40 @@ fn test_config_show_empty_system_config(mut repo: TestRepo, temp_home: TempDir) 
     });
 }
 
+#[rstest]
+#[case::system("system")]
+#[case::user("user")]
+#[case::project("project")]
+fn test_config_show_reports_unreadable_source_and_continues(repo: TestRepo, #[case] source: &str) {
+    let mut cmd = repo.wt_command();
+    let system_dir = if source == "system" {
+        let dir = tempfile::tempdir().unwrap();
+        cmd.env("WORKTRUNK_SYSTEM_CONFIG_PATH", dir.path());
+        Some(dir)
+    } else {
+        None
+    };
+
+    match source {
+        "user" => fs::write(repo.test_config_path(), [0xff]).unwrap(),
+        "project" => {
+            repo.write_project_config("");
+            fs::write(repo.root_path().join(".config/wt.toml"), [0xff]).unwrap();
+        }
+        "system" => {}
+        _ => unreachable!(),
+    }
+
+    let output = cmd.args(["config", "show"]).output().unwrap();
+    drop(system_dir);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.ansi_strip();
+    assert!(stdout.contains("Cannot read config"), "stdout:\n{stdout}");
+    assert!(stdout.contains("OTHER"), "report was truncated:\n{stdout}");
+}
+
 /// A user config that doesn't parse must fail these commands *legibly*.
 ///
 /// `UserConfig::load()`'s error is `LoadError::File`'s multi-line Display —
@@ -561,11 +621,8 @@ fn test_config_show_empty_system_config(mut repo: TestRepo, temp_home: TempDir) 
 ///
 /// One case per fixed call site, because the `debug_assert!` only fires on a
 /// path something exercises: an uncovered site is one where a future bare `?`
-/// regresses silently. `config show --format json` is the sharpest of them —
-/// the text form of that same command renders a full diagnosis of this exact
-/// file.
+/// regresses silently. The JSON form has a separate in-band error test below.
 #[rstest]
-#[case::config_show_json(&["config", "show", "--format=json"])]
 #[case::step_prune(&["step", "prune", "--dry-run"])]
 #[case::step_relocate(&["step", "relocate", "--dry-run"])]
 #[case::step_eval(&["step", "eval", "{{ branch }}"])]
@@ -1340,6 +1397,29 @@ fn test_config_show_invalid_user_toml(mut repo: TestRepo, temp_home: TempDir) {
     fs::write(
         global_config_dir.join("config.toml"),
         "this is not valid toml {{{",
+    )
+    .unwrap();
+
+    let settings = setup_snapshot_settings_with_home(&repo, &temp_home);
+    settings.bind(|| {
+        let mut cmd = repo.wt_command();
+        cmd.arg("config").arg("show").current_dir(repo.root_path());
+        set_temp_home_env(&mut cmd, temp_home.path());
+        set_xdg_config_path(&mut cmd, temp_home.path());
+
+        assert_cmd_snapshot!(cmd);
+    });
+}
+
+#[rstest]
+fn test_config_show_unknown_list_column(mut repo: TestRepo, temp_home: TempDir) {
+    repo.setup_mock_ci_tools_unauthenticated();
+
+    let global_config_dir = temp_home.path().join(".config").join("worktrunk");
+    fs::create_dir_all(&global_config_dir).unwrap();
+    fs::write(
+        global_config_dir.join("config.toml"),
+        "[list]\njson-schema = 2\ncolumns = [\"branch\", \"nosuchcolumn\"]\n",
     )
     .unwrap();
 
@@ -3680,6 +3760,93 @@ fn test_config_update_rejects_print(repo: TestRepo) {
         stderr.contains("unexpected argument '--print'"),
         "unexpected error: {stderr}"
     );
+}
+
+#[rstest]
+fn test_config_update_output_warns_about_dropped_approvals(repo: TestRepo) {
+    fs::write(
+        repo.test_config_path(),
+        r#"[list]
+json-schema = 1
+
+[projects."github.com/user/repo"]
+approved-commands = ["npm ci", "npm test"]
+
+[projects."github.com/other/repo"]
+approved-commands = ["cargo test"]
+"#,
+    )
+    .unwrap();
+
+    let output = repo
+        .wt_command()
+        .args(["config", "update", "--output=-"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.ansi_strip();
+    assert!(
+        stderr.contains("approved-commands") && stderr.contains("wt config update"),
+        "stderr should explain how to preserve approvals, got: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("approved-commands"),
+        "the printed config drops them, got: {stdout}"
+    );
+}
+
+#[rstest]
+fn test_config_update_output_rejects_source_path(repo: TestRepo) {
+    let original = r#"[list]
+json-schema = 1
+
+[projects."github.com/user/repo"]
+approved-commands = ["npm test"]
+"#;
+    fs::write(repo.test_config_path(), original).unwrap();
+
+    let output = repo
+        .wt_command()
+        .args(["config", "update", "--output"])
+        .arg(repo.test_config_path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        fs::read_to_string(repo.test_config_path()).unwrap(),
+        original
+    );
+    assert!(!repo.test_approvals_path().exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.ansi_strip();
+    assert!(
+        stderr.contains("Cannot overwrite user config") && stderr.contains("wt config update"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[rstest]
+fn test_config_update_output_can_replace_source_without_approvals(repo: TestRepo) {
+    fs::write(
+        repo.test_config_path(),
+        "worktree-path = \"../{{ main_worktree }}.{{ branch }}\"\n",
+    )
+    .unwrap();
+
+    let output = repo
+        .wt_command()
+        .args(["config", "update", "--output"])
+        .arg(repo.test_config_path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let updated = fs::read_to_string(repo.test_config_path()).unwrap();
+    assert!(updated.contains("{{ repo }}"), "config:\n{updated}");
 }
 
 /// `wt config update` with no deprecated settings reports nothing to do
@@ -6410,6 +6577,13 @@ mod plugin_prompt_pty {
 
 #[rstest]
 fn test_config_show_json(repo: TestRepo, temp_home: TempDir) {
+    let system_config_dir = tempfile::tempdir().unwrap();
+    let system_config_path = system_config_dir.path().join("config.toml");
+    fs::write(
+        &system_config_path,
+        "[list]\nfull = true\njson-schema = 2\n",
+    )
+    .unwrap();
     let global_config_dir = temp_home.path().join(".config").join("worktrunk");
     fs::create_dir_all(&global_config_dir).unwrap();
     fs::write(
@@ -6422,6 +6596,7 @@ fn test_config_show_json(repo: TestRepo, temp_home: TempDir) {
     repo.configure_wt_cmd(&mut cmd);
     set_xdg_config_path(&mut cmd, temp_home.path());
     set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.env("WORKTRUNK_SYSTEM_CONFIG_PATH", system_config_path);
     cmd.args(["config", "show", "--format=json"])
         .current_dir(repo.root_path());
 
@@ -6437,9 +6612,300 @@ fn test_config_show_json(repo: TestRepo, temp_home: TempDir) {
     assert!(json["user"]["exists"].as_bool().unwrap());
     assert!(json["user"]["path"].as_str().is_some());
     assert!(json["user"]["config"].is_object());
+    assert_eq!(json["user"]["config"]["list"]["full"], true);
 
     // Project config doesn't exist in this fixture
     assert!(!json["project"]["exists"].as_bool().unwrap());
+}
+
+#[rstest]
+#[case::environment("WORKTRUNK_LIST__TIMEOUT_MS", "invalid", None)]
+#[case::environment_validation("WORKTRUNK_WORKTREE_PATH", "", None)]
+#[case::inline("", "", Some("list.timeout-ms=\"invalid\""))]
+fn test_config_show_json_allows_invalid_runtime_override(
+    repo: TestRepo,
+    temp_home: TempDir,
+    #[case] env_name: &str,
+    #[case] env_value: &str,
+    #[case] inline: Option<&str>,
+) {
+    let system_config_dir = tempfile::tempdir().unwrap();
+    let system_config_path = system_config_dir.path().join("config.toml");
+    fs::write(&system_config_path, "[list]\nbranches = true\n").unwrap();
+    let global_config_dir = temp_home.path().join(".config").join("worktrunk");
+    fs::create_dir_all(&global_config_dir).unwrap();
+    fs::write(
+        global_config_dir.join("config.toml"),
+        "[list]\nfull = true\n",
+    )
+    .unwrap();
+
+    let mut cmd = wt_command();
+    repo.configure_wt_cmd(&mut cmd);
+    set_xdg_config_path(&mut cmd, temp_home.path());
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.env("WORKTRUNK_SYSTEM_CONFIG_PATH", system_config_path);
+    if let Some(inline) = inline {
+        cmd.args(["--config-set", inline]);
+    } else {
+        cmd.env(env_name, env_value);
+    }
+    cmd.args(["config", "show", "--format=json"])
+        .current_dir(repo.root_path());
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "runtime overrides should warn without invalidating the source config: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(json["user"]["config"]["list"]["branches"], true);
+    assert_eq!(json["user"]["config"]["list"]["full"], true);
+}
+
+#[rstest]
+#[case::text(&["config", "show"], false, false)]
+#[case::json(&["config", "show", "--format=json"], false, false)]
+#[case::json_with_unrelated_env(&["config", "show", "--format=json"], true, false)]
+#[case::json_with_masking_env(&["config", "show", "--format=json"], false, true)]
+fn test_config_show_rejects_semantically_invalid_user_config(
+    repo: TestRepo,
+    #[case] args: &[&str],
+    #[case] with_unrelated_env: bool,
+    #[case] with_masking_env: bool,
+) {
+    fs::write(repo.test_config_path(), "worktree-path = \"\"\n").unwrap();
+
+    let mut cmd = repo.wt_command();
+    cmd.args(args);
+    if with_unrelated_env {
+        cmd.env("WORKTRUNK_LIST__FULL", "true");
+    } else if with_masking_env {
+        cmd.env("WORKTRUNK_WORKTREE_PATH", "../valid");
+    }
+    let output = cmd.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    if args.contains(&"--format=json") {
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let user_section = stdout
+            .split("USER CONFIG")
+            .nth(1)
+            .and_then(|rest| rest.split("PROJECT CONFIG").next())
+            .unwrap();
+        assert!(user_section.contains("Invalid config"), "{stdout}");
+        assert!(
+            user_section.contains("worktree-path cannot be empty"),
+            "{stdout}"
+        );
+    }
+}
+
+#[rstest]
+#[case::text(&["config", "show"])]
+#[case::json(&["config", "show", "--format=json"])]
+fn test_config_show_rejects_semantically_invalid_system_config(
+    repo: TestRepo,
+    #[case] args: &[&str],
+) {
+    let system_config_dir = tempfile::tempdir().unwrap();
+    let system_config_path = system_config_dir.path().join("config.toml");
+    fs::write(&system_config_path, "worktree-path = \"\"\n").unwrap();
+    fs::write(repo.test_config_path(), "worktree-path = \"../valid\"\n").unwrap();
+
+    let output = repo
+        .wt_command()
+        .env("WORKTRUNK_SYSTEM_CONFIG_PATH", system_config_path)
+        .args(args)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    if args.contains(&"--format=json") {
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let system_section = stdout
+        .split("SYSTEM CONFIG")
+        .nth(1)
+        .and_then(|rest| rest.split("USER CONFIG").next())
+        .unwrap();
+    assert!(system_section.contains("Invalid config"), "{stdout}");
+    assert!(
+        system_section.contains("worktree-path cannot be empty"),
+        "{stdout}"
+    );
+}
+
+#[rstest]
+#[case::text(&["config", "show"])]
+#[case::json(&["config", "show", "--format=json"])]
+fn test_config_show_warns_once_for_missing_explicit_config(repo: TestRepo, #[case] args: &[&str]) {
+    let output = repo
+        .wt_command()
+        .args(["--config", "/nonexistent/worktrunk/config.toml"])
+        .args(args)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Config file not found").count(),
+        1,
+        "{stderr}"
+    );
+}
+
+#[rstest]
+fn test_config_show_json_rejects_invalid_custom_column(repo: TestRepo, temp_home: TempDir) {
+    let global_config_dir = temp_home.path().join(".config").join("worktrunk");
+    fs::create_dir_all(&global_config_dir).unwrap();
+    fs::write(
+        global_config_dir.join("config.toml"),
+        "[list.custom-columns.ticket]\ntemplate = \"{{ branch }}\"\nwidth = 0\n",
+    )
+    .unwrap();
+
+    let mut cmd = wt_command();
+    repo.configure_wt_cmd(&mut cmd);
+    set_xdg_config_path(&mut cmd, temp_home.path());
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.args(["config", "show", "--format=json"])
+        .current_dir(repo.root_path());
+
+    let output = cmd.output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert!(output.stderr.is_empty());
+}
+
+#[rstest]
+fn test_config_show_json_rejects_invalid_system_config(repo: TestRepo, temp_home: TempDir) {
+    let system_config_dir = tempfile::tempdir().unwrap();
+    let system_config_path = system_config_dir.path().join("config.toml");
+    fs::write(&system_config_path, "invalid = [toml\n").unwrap();
+    let global_config_dir = temp_home.path().join(".config").join("worktrunk");
+    fs::create_dir_all(&global_config_dir).unwrap();
+    fs::write(global_config_dir.join("config.toml"), "").unwrap();
+
+    let mut cmd = wt_command();
+    repo.configure_wt_cmd(&mut cmd);
+    set_xdg_config_path(&mut cmd, temp_home.path());
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.env("WORKTRUNK_SYSTEM_CONFIG_PATH", &system_config_path);
+    cmd.args(["config", "show", "--format=json"])
+        .current_dir(repo.root_path());
+
+    let output = cmd.output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let json = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(json["system"]["exists"], true);
+    assert!(
+        json["user"]["config"].is_object(),
+        "a broken system source must not erase valid user config"
+    );
+}
+
+#[rstest]
+fn test_config_show_json_rejects_unreadable_system_config(repo: TestRepo, temp_home: TempDir) {
+    let system_config_dir = tempfile::tempdir().unwrap();
+
+    let mut cmd = wt_command();
+    repo.configure_wt_cmd(&mut cmd);
+    set_xdg_config_path(&mut cmd, temp_home.path());
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.env("WORKTRUNK_SYSTEM_CONFIG_PATH", system_config_dir.path());
+    cmd.args(["config", "show", "--format=json"])
+        .current_dir(repo.root_path());
+
+    let output = cmd.output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let json = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(json["system"]["exists"], true);
+}
+
+#[rstest]
+fn test_config_show_json_rejects_invalid_approvals_file(repo: TestRepo) {
+    fs::write(repo.test_approvals_path(), "not valid TOML [[[").unwrap();
+
+    let output = repo
+        .wt_command()
+        .args(["config", "show", "--format=json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+}
+
+#[rstest]
+fn test_config_show_json_rejects_invalid_user_config(repo: TestRepo) {
+    fs::write(repo.test_config_path(), "invalid = [toml\n").unwrap();
+
+    let output = repo
+        .wt_command()
+        .args(["config", "show", "--format=json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let json = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(json["user"]["exists"], true);
+    assert!(json["user"]["config"].is_null());
+}
+
+#[rstest]
+fn test_config_show_json_rejects_unreadable_user_config(repo: TestRepo) {
+    fs::write(repo.test_config_path(), [0xff]).unwrap();
+
+    let output = repo
+        .wt_command()
+        .args(["config", "show", "--format=json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let json = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(json["user"]["exists"], true);
+    assert!(json["user"]["config"].is_null());
+}
+
+#[rstest]
+fn test_config_show_json_rejects_invalid_project_config(repo: TestRepo) {
+    repo.write_project_config("invalid = [toml\n");
+
+    let output = repo
+        .wt_command()
+        .args(["config", "show", "--format=json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let json = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(json["project"]["exists"], true);
+    assert!(json["project"]["config"].is_null());
+}
+
+#[rstest]
+fn test_config_show_json_rejects_unreadable_project_config(repo: TestRepo) {
+    repo.write_project_config("");
+    fs::write(repo.root_path().join(".config/wt.toml"), [0xff]).unwrap();
+
+    let output = repo
+        .wt_command()
+        .args(["config", "show", "--format=json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let json = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert_eq!(json["project"]["exists"], true);
+    assert!(json["project"]["config"].is_null());
 }
 
 #[rstest]

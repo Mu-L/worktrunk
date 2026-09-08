@@ -752,10 +752,9 @@ Global Options:
 
 Show configuration files & locations.
 
-Shows location and contents of user config (`~/.config/worktrunk/config.toml`)
-and project config (`.config/wt.toml`). Also shows system config if present.
-
-If a config file doesn't exist, shows defaults that would be used.
+Shows config sources and checks for invalid TOML or list columns, misplaced or
+deprecated keys, and commands awaiting approval. It renders every section
+before failing; warnings exit zero.
 
 ### Full diagnostics
 
@@ -824,8 +823,8 @@ instead of applying it in place. Use `-` for stdout. When both user and project
 config need migration, stdout emits a labeled inspection artifact and file
 output fails rather than combining the configs.
 
-Output artifacts omit deprecated `approved-commands`; only in-place updates
-move those entries to `approvals.toml`.
+`--output` omits deprecated `approved-commands` with a stderr warning; only an
+in-place update migrates them to `approvals.toml`.
 
 ### Examples
 
