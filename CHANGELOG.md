@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`wt config plugins claude uninstall` / `codex uninstall` no longer report success over a marketplace that is still there**: to tell an already-removed marketplace from a removal that failed, uninstall used to read the harness's own config file. A file or key the harness renamed reads as an absence there, so every failed removal would have printed `Plugin & marketplace removed` and exited 0. It now asks `claude` / `codex plugin marketplace list --json`, and an answer it cannot read leaves the harness's error standing. ([#4048](https://github.com/max-sixty/worktrunk/pull/4048))
+
 ## 0.77.0
 
 ### Improved
