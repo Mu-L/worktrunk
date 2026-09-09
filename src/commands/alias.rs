@@ -173,7 +173,20 @@ impl AliasOptions {
     /// instead. The parser raises an actionable error pointing at the new
     /// subcommand rather than silently forwarding the flag into `{{ args }}`.
     /// The bail fires only outside `literal_mode`, so `wt alias -- --dry-run`
-    /// still forwards `--dry-run` as a positional.
+    /// still forwards `--dry-run` as a positional. A template that references
+    /// `dry_run` owns the flag's value-taking spellings — the same deference
+    /// `--help` gets in `try_intercept_alias_help` and `--yes` gets from the
+    /// `--KEY` rule above — so `--dry-run <value>` and `--dry-run=<value>`
+    /// bind there rather than erroring. Only the `=` form used to bind, since
+    /// the bail matches the whole token, so one flag behaved two ways.
+    ///
+    /// A bare `--dry-run` at end of args bails either way. The general `--KEY`
+    /// rule would forward it into `{{ args }}` with `dry_run` left unset, so a
+    /// `{% if dry_run %}` template would run the live command with nothing on
+    /// stderr — the silent forward this bail exists to prevent, on the one flag
+    /// whose purpose is not doing the thing. The referenced case gets its own
+    /// message naming `--dry-run=1`, because `wt config alias dry-run <name>`
+    /// previews the alias instead of passing the value the user is after.
     ///
     /// Hyphens in variable names are canonicalized to underscores before
     /// lookup and storage (minijinja parses `{{ my-var }}` as subtraction),
@@ -212,9 +225,16 @@ impl AliasOptions {
                 continue;
             }
             if arg == "--dry-run" {
-                bail!(
-                    "--dry-run is no longer supported; use `wt config alias dry-run {name}` instead"
-                );
+                if !referenced_vars.contains("dry_run") {
+                    bail!(
+                        "--dry-run is no longer supported; use `wt config alias dry-run {name}` instead"
+                    );
+                }
+                if i + 1 == args.len() {
+                    bail!(
+                        "--dry-run at the end of the command binds nothing, leaving `dry_run` unset in {name}; pass `--dry-run=1` instead"
+                    );
+                }
             }
             if let Some(rest) = arg.strip_prefix("--") {
                 if let Some((key, value)) = rest.split_once('=') {
@@ -1407,6 +1427,63 @@ cmd = [
         assert_snapshot!(parse(&["deploy", "--=value"]).unwrap_err(), @"invalid KEY=VALUE: key cannot be empty");
         // Retired `--dry-run` flag gives an actionable error pointing at the new subcommand.
         assert_snapshot!(parse(&["deploy", "--dry-run"]).unwrap_err(), @"--dry-run is no longer supported; use `wt config alias dry-run deploy` instead");
+    }
+
+    /// A template that references `{{ dry_run }}` owns the flag's value-taking
+    /// spellings: the retired-flag bail steps aside and both bind, matching
+    /// `--help`'s deference to a `help` binding and `--yes`'s to a `yes` one.
+    /// A bare `--dry-run` at end of args still errors — see
+    /// `test_parse_dry_run_bare_errors_when_referenced`.
+    #[test]
+    fn test_parse_dry_run_binds_when_referenced() {
+        use insta::assert_debug_snapshot;
+        assert_debug_snapshot!(parse_with(&["deploy", "--dry-run", "1"], &["dry_run"]).unwrap(), @r#"
+        AliasOptions {
+            name: "deploy",
+            vars: [
+                (
+                    "dry_run",
+                    "1",
+                ),
+            ],
+            positional_args: [],
+        }
+        "#);
+        // The `=` form already bound before this — the bail matches the whole
+        // token — so the two spellings agree either way.
+        assert_debug_snapshot!(parse_with(&["deploy", "--dry-run=1"], &["dry_run"]).unwrap(), @r#"
+        AliasOptions {
+            name: "deploy",
+            vars: [
+                (
+                    "dry_run",
+                    "1",
+                ),
+            ],
+            positional_args: [],
+        }
+        "#);
+    }
+
+    /// The general `--KEY` end-of-args rule would forward a bare `--dry-run`
+    /// into `{{ args }}` with `dry_run` unset, so `{% if dry_run %}` would run
+    /// the live command silently. The bail holds there for a referenced
+    /// template too, with a message naming the spelling that does bind.
+    #[test]
+    fn test_parse_dry_run_bare_errors_when_referenced() {
+        use insta::{assert_debug_snapshot, assert_snapshot};
+        assert_snapshot!(parse_with(&["deploy", "--dry-run"], &["dry_run"]).unwrap_err(), @"--dry-run at the end of the command binds nothing, leaving `dry_run` unset in deploy; pass `--dry-run=1` instead");
+        // A value-taking spelling is unaffected, and `--` still forwards the
+        // token verbatim rather than erroring.
+        assert_debug_snapshot!(parse_with(&["deploy", "--", "--dry-run"], &["dry_run"]).unwrap(), @r#"
+        AliasOptions {
+            name: "deploy",
+            vars: [],
+            positional_args: [
+                "--dry-run",
+            ],
+        }
+        "#);
     }
 
     /// `referenced_vars_for_config` unions across pipeline steps so a var
