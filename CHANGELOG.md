@@ -4,9 +4,17 @@
 
 ### Improved
 
+- **`wt config show` gives one `wt config shell install` for the whole shell section**: an outdated wrapper, fish integration still at the deprecated `conf.d` path, and a missing fish completions file each carried their own per-shell hint, so a machine with all three printed three commands where the bare one fixes everything. The rows still say what's wrong; the section's single trailing hint says what to run. The zsh `compinit` snippet is syntax-highlighted like every other command block.
+
+- **Interactive prompts no longer open with a blank line**: `wt config shell install`, `wt config plugins claude install`, and the commit-message setup offer at the top of `wt merge` all began with one. A prompt that follows other output keeps the blank line separating it.
+
 - **`wt config update --output <path>` confirms the write**: it now prints `✓ Wrote user config migration @ ~/migrated.toml`, so a command whose only effect is the file it wrote now says where that file is. Writing to stdout with `--output=-` stays silent, since the artifact is right there. ([#4053](https://github.com/max-sixty/worktrunk/pull/4053))
 
 ### Fixed
+
+- **`wt config shell install` migrates a fish wrapper at the deprecated `conf.d` path even when `~/.config/fish/functions` doesn't exist yet**: fish was skipped for want of a config location, so the bare command left the deprecated wrapper running and only `wt config shell install fish` migrated it. A worktrunk wrapper at the old path now counts as fish being configured, just at the old path. `wt config show` reports that wrapper too, where before it showed nothing at all for fish unless fish was on `PATH`.
+
+- **`wt config shell install` no longer tells an already-wrapped shell to restart**: reinstalling from inside a shell that has the wrapper loaded — after a version bump, or when the fish extension moves from `conf.d` to `functions` — printed `↳ Restart shell to activate shell integration` right after the wrapper had intercepted the command. The hint now only appears when integration isn't active.
 
 - **An alias that binds `dry_run` can take `--dry-run <value>`**: `wt <alias> --dry-run <value>` answered the retired-flag error even when the alias's own template referenced `{{ dry_run }}`, while `--dry-run=<value>` bound normally — so one flag behaved two ways. Both value-taking spellings now bind for an alias that references the name, matching how `--help` and `--yes` already yield to a template that binds them. A bare `--dry-run` with no value still errors, since forwarding it into `{{ args }}` would leave `dry_run` unset and run the live command; the message names `--dry-run=1`. ([#4058](https://github.com/max-sixty/worktrunk/pull/4058))
 
