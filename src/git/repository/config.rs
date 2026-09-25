@@ -955,7 +955,7 @@ impl Repository {
         }
 
         let spec = format!("{}:.config/wt.toml", self.default_branch()?);
-        match self.run_command_output(&["show", &spec]) {
+        match self.run_command_output(&["show", "--end-of-options", &spec]) {
             Ok(output) if output.status.success() => Some((
                 String::from_utf8_lossy(&output.stdout).into_owned(),
                 PathBuf::from(&spec),
